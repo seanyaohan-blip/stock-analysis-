@@ -3,6 +3,7 @@ from pathlib import Path
 import sys
 import unittest
 
+import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -63,6 +64,23 @@ class PremarketReportTests(unittest.TestCase):
         self.assertIsNotNone(tbl_indent)
         self.assertEqual(tbl_indent.get(qn("w:type")), "dxa")
         self.assertEqual(tbl_indent.get(qn("w:w")), "120")
+
+    def test_sheet_fallback_prefers_action_first_name(self):
+        preferred = pd.DataFrame([{"项目": "新首页"}])
+        legacy = pd.DataFrame([{"项目": "旧首页"}])
+        sheets = {"01_今日决策": preferred, "Decision_Center": legacy}
+
+        result = main.get_sheet_with_fallback(sheets, "01_今日决策", "Decision_Center")
+
+        self.assertEqual(result.iloc[0]["项目"], "新首页")
+
+    def test_sheet_fallback_reads_legacy_name_when_needed(self):
+        legacy = pd.DataFrame([{"项目": "旧首页"}])
+        sheets = {"Decision_Center": legacy}
+
+        result = main.get_sheet_with_fallback(sheets, "01_今日决策", "Decision_Center")
+
+        self.assertEqual(result.iloc[0]["项目"], "旧首页")
 
 
 if __name__ == "__main__":

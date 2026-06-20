@@ -39,7 +39,8 @@ output/V2.8.5_A股盘前决策简报_20260619_083000.docx
 ```
 
 程序会自动读取父目录 `output` 文件夹里最新的 `V2.8.5_每日行情输出*.xlsx`，并优先使用
-`Decision_Center`、`FirstYear_Allocation`、`Execution_Plan`、`Checks`、`Emotion`、`Quality_Score` 与 `Exposure`。
+`01_今日决策`、`02_今日动作`、`03_买入候选`、`04_持仓风险`、`05_年度配置`、
+`06_组合总览`、`Checks`、`Emotion`、`Quality_Score` 与 `Exposure`。旧版英文 Sheet 名仅用于兼容回退。
 
 报告中的“第一年度配置进度”使用全资产口径，展示动态目标、当前映射金额、资金缺口和完成率。
 年度缺口只表示长期规划空间，不能绕过质量准入、买点过滤或证券账户仓位上限。

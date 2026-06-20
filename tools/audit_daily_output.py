@@ -15,21 +15,25 @@ from openpyxl import load_workbook
 
 ROOT = Path(__file__).resolve().parents[1]
 TARGET_SHEETS = [
-    "Decision_Center",
-    "Dashboard",
-    "FirstYear_Allocation",
-    "Execution_Plan",
-    "Checks",
-    "Framework_Rules",
+    "01_今日决策",
+    "02_今日动作",
+    "03_买入候选",
+    "04_持仓风险",
+    "05_年度配置",
+    "06_组合总览",
+    "Double_Anchor",
     "Emotion",
     "Quality_Score",
     "Exposure",
     "Market_Data",
-    "Double_Anchor",
-    "Buy_Filter",
     "Positions",
-    "Positions_Action",
+    "Broker_Snapshot",
+    "Watchlist",
+    "Framework_Rules",
+    "Checks",
+    "使用说明",
 ]
+FRONT_SHEETS = TARGET_SHEETS[:6]
 
 
 def normalize_code(value: Any) -> str:
@@ -84,18 +88,19 @@ def main(path: Path) -> int:
     wb = load_workbook(path, data_only=False, read_only=False, keep_links=True)
     result["sheetnames"] = wb.sheetnames
     result["checks"]["target_sheets_present"] = all(name in wb.sheetnames for name in TARGET_SHEETS)
+    result["checks"]["front_sheet_order_ok"] = wb.sheetnames[:6] == FRONT_SHEETS
     result["checks"]["external_links"] = len(getattr(wb, "_external_links", []))
 
     watch_codes = csv_codes(ROOT / "watchlist.csv")
     position_codes = csv_codes(ROOT / "positions.csv")
     expected_market = list(dict.fromkeys(watch_codes + position_codes))
     expected_counts = {
-        "FirstYear_Allocation": 11,
+        "05_年度配置": 11,
         "Market_Data": len(expected_market),
         "Double_Anchor": 8,
-        "Buy_Filter": len(watch_codes),
+        "03_买入候选": len(watch_codes),
         "Positions": len(position_codes),
-        "Positions_Action": len(position_codes),
+        "04_持仓风险": len(position_codes),
     }
 
     required = {
@@ -104,12 +109,12 @@ def main(path: Path) -> int:
             "Amount", "Avg20Amount", "Avg20AmountSource", "ETFShareChg", "Premium",
             "LeaderStatus", "PrevDayLow", "PrevDayLowSource", "QuoteTime", "DataSource",
         ],
-        "Buy_Filter": [
+        "03_买入候选": [
             "Code", "Name", "Latest", "PctChg", "日内位置", "量能倍数", "分时结构",
             "量价关系", "份额变动", "折溢价", "龙头同步", "次日验证", "通过项",
-            "通过明细", "未通过项", "待确认项", "一票否决", "否决原因", "建议",
+            "通过明细", "未通过项", "待确认项", "一票否决", "否决原因", "建议", "阻断原因", "数据状态",
         ],
-        "FirstYear_Allocation": [
+        "05_年度配置": [
             "配置项", "资产层级", "映射代码", "年度目标占比", "按当前全资产目标金额",
             "最新持仓金额", "年度资金缺口", "年度完成率", "目标收益下限", "目标收益上限",
             "进度状态", "执行约束", "来源",
@@ -118,9 +123,8 @@ def main(path: Path) -> int:
             "Code", "Name", "Shares", "Cost", "Latest", "Latest Source", "Market Value",
             "P/L", "P/L%", "Weight", "Full Asset Weight", "Role", "Target Weight", "V2.8.5 Action",
         ],
-        "Positions_Action": [
-            "Code", "Name", "Latest", "PctChg", "High", "Low", "Amount", "Avg20Amount",
-            "触发提醒", "动作建议", "是否复审", "说明",
+        "04_持仓风险": [
+            "风险级别", "Code", "Name", "动作建议", "触发原因", "Weight", "Target Weight",
         ],
     }
 
@@ -184,7 +188,19 @@ def main(path: Path) -> int:
     result["quote_time_max"] = max(quote_times).isoformat(sep=" ") if quote_times else None
     result["checks"]["all_quotes_today"] = bool(quote_times) and all(item.date() == datetime.now().date() for item in quote_times)
 
-    dashboard_ws = wb["Dashboard"]
+    candidate_ws = wb["03_买入候选"]
+    candidate_headers = headers(candidate_ws)
+    missing_red_blockers = []
+    for row in range(2, candidate_ws.max_row + 1):
+        if str(candidate_ws.cell(row, candidate_headers["买点灯号"]).value) != "红":
+            continue
+        blocker = candidate_ws.cell(row, candidate_headers["阻断原因"]).value
+        if blocker in (None, ""):
+            missing_red_blockers.append(row)
+    result["checks"]["red_candidate_blockers_complete"] = not missing_red_blockers
+    result["checks"]["red_candidate_missing_blocker_rows"] = missing_red_blockers
+
+    dashboard_ws = wb["06_组合总览"]
     dashboard = {
         str(dashboard_ws.cell(row, 1).value): dashboard_ws.cell(row, 2).value
         for row in range(2, dashboard_ws.max_row + 1)

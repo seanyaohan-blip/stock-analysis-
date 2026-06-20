@@ -49,6 +49,29 @@ OUTPUT_DIR = BASE_DIR / "output"
 FRAMEWORK_VERSION = "V2.8.5"
 PRODUCT_NAME = "ETF / A股统一投资决策仪表盘"
 
+FRONT_SHEET_ORDER = [
+    "01_今日决策",
+    "02_今日动作",
+    "03_买入候选",
+    "04_持仓风险",
+    "05_年度配置",
+    "06_组合总览",
+]
+
+DETAIL_SHEET_ORDER = [
+    "Double_Anchor",
+    "Emotion",
+    "Quality_Score",
+    "Exposure",
+    "Market_Data",
+    "Positions",
+    "Broker_Snapshot",
+    "Watchlist",
+    "Framework_Rules",
+    "Checks",
+    "使用说明",
+]
+
 # V2.8.5 的硬门槛集中放在这里，避免规则散落在代码里。
 QUALITY_CORE_MIN = 8.0
 QUALITY_OBSERVE_MIN = 6.0
@@ -1880,6 +1903,14 @@ def build_dashboard(
     return pd.DataFrame(rows)
 
 
+def build_portfolio_overview(dashboard: pd.DataFrame) -> pd.DataFrame:
+    """组合总览只保留账户、现金和配置指标；逐只提醒移至持仓风险页。"""
+    if dashboard.empty or "项目" not in dashboard.columns:
+        return dashboard.copy()
+    mask = ~dashboard["项目"].astype(str).str.startswith("提醒-")
+    return dashboard.loc[mask].reset_index(drop=True)
+
+
 def build_decision_center(
     double_anchor: pd.DataFrame,
     emotion: pd.DataFrame,
@@ -2009,6 +2040,248 @@ def build_execution_plan(
     return pd.DataFrame(rows).sort_values(["优先级", "动作类型"], ignore_index=True)
 
 
+def build_buy_candidates_view(
+    buy_filter: pd.DataFrame,
+    market_permission: str,
+) -> pd.DataFrame:
+    """保留全部关注标的，并按绿、黄、红、灰排序显示阻断原因。"""
+    if buy_filter.empty:
+        return buy_filter.copy()
+    result = buy_filter.copy()
+    result["市场权限"] = market_permission
+
+    def blocker(row: pd.Series) -> str:
+        reason = str(row.get("否决原因", "") or "").strip()
+        signal = str(row.get("买点灯号", "灰"))
+        if reason:
+            return reason
+        if market_permission != "开放买点复核" and signal in {"绿", "黄"}:
+            return f"市场权限：{market_permission}"
+        if signal == "红":
+            return str(row.get("建议", "未通过买点门槛") or "未通过买点门槛")
+        if signal == "灰":
+            return "证据不足或仅观察"
+        return "无硬性阻断，仍需人工复核"
+
+    result["阻断原因"] = result.apply(blocker, axis=1)
+    result["数据状态"] = "有效"
+    if "Latest" in result.columns:
+        latest = pd.to_numeric(result["Latest"], errors="coerce")
+        result.loc[latest.isna(), "数据状态"] = "行情未刷新"
+    if "PctChg" in result.columns:
+        pct_chg = pd.to_numeric(result["PctChg"], errors="coerce")
+        result.loc[pct_chg.isna(), "数据状态"] = "行情未刷新"
+
+    signal_rank = {"绿": 0, "黄": 1, "红": 2, "灰": 3}
+    result["_signal_rank"] = result["买点灯号"].map(signal_rank).fillna(4)
+    result["_quality_rank"] = pd.to_numeric(result.get("质量评分"), errors="coerce").fillna(-1)
+    result["_pass_rank"] = pd.to_numeric(result.get("通过项"), errors="coerce").fillna(-1)
+    result["_room_rank"] = pd.to_numeric(result.get("剩余额度"), errors="coerce").fillna(-1)
+    result = result.sort_values(
+        ["_signal_rank", "_quality_rank", "_pass_rank", "_room_rank"],
+        ascending=[True, False, False, False],
+        kind="stable",
+    ).drop(columns=["_signal_rank", "_quality_rank", "_pass_rank", "_room_rank"])
+
+    priority_columns = [
+        "买点灯号", "Code", "Name", "建议", "阻断原因", "通过项",
+        "质量状态", "市场权限", "当前仓位", "目标仓位", "剩余额度",
+        "年度配置项", "年度资金缺口", "年度完成率", "数据状态",
+    ]
+    ordered = [column for column in priority_columns if column in result.columns]
+    ordered += [column for column in result.columns if column not in ordered]
+    return result[ordered].reset_index(drop=True)
+
+
+def build_position_risk_view(
+    positions_action: pd.DataFrame,
+    positions_sheet: pd.DataFrame,
+) -> pd.DataFrame:
+    """把持仓、盈亏、超配和专项纪律合并成按风险优先的工作表。"""
+    if positions_sheet.empty:
+        return positions_action.copy()
+    base = positions_sheet.copy()
+    action_columns = [
+        column for column in ["Code", "触发提醒", "动作建议", "说明", "纪律分类", "是否复审"]
+        if column in positions_action.columns
+    ]
+    actions = positions_action[action_columns].copy() if action_columns else pd.DataFrame(columns=["Code"])
+    result = base.merge(actions, on="Code", how="left")
+
+    risk_levels: list[str] = []
+    reasons: list[str] = []
+    for _, row in result.iterrows():
+        weight = to_float(row.get("Weight"))
+        target = to_float(row.get("Target Weight"))
+        triggered = str(row.get("触发提醒", "否")) == "是"
+        overweight = weight is not None and target is not None and weight > target
+        loss = to_float(first_valid(row.get("Unrealized PnL"), row.get("P/L"))) or 0
+        reason_parts: list[str] = []
+        note = str(row.get("说明", "") or "").strip()
+        if triggered and note:
+            reason_parts.append(note)
+        if overweight:
+            reason_parts.append(f"当前仓位{weight:.2%}高于目标{target:.2%}")
+        if loss < 0 and not reason_parts:
+            reason_parts.append(f"当前浮亏{loss:,.0f}元")
+        if triggered or overweight:
+            risk_levels.append("红")
+        elif loss < 0:
+            risk_levels.append("黄")
+        else:
+            risk_levels.append("灰")
+        reasons.append("；".join(reason_parts) if reason_parts else "未触发减仓或超配条件")
+
+    result["风险级别"] = risk_levels
+    result["触发原因"] = reasons
+    if "动作建议" not in result.columns:
+        result["动作建议"] = result.get(f"{FRAMEWORK_VERSION} Action", "观察")
+    result["动作建议"] = result["动作建议"].fillna(result.get(f"{FRAMEWORK_VERSION} Action", "观察"))
+    risk_rank = {"红": 0, "黄": 1, "灰": 2}
+    result["_risk_rank"] = result["风险级别"].map(risk_rank).fillna(3)
+    result["_weight_rank"] = pd.to_numeric(result.get("Weight"), errors="coerce").fillna(0)
+    result = result.sort_values(["_risk_rank", "_weight_rank"], ascending=[True, False], kind="stable")
+    result = result.drop(columns=["_risk_rank", "_weight_rank"])
+    priority_columns = [
+        "风险级别", "Code", "Name", "动作建议", "触发原因", "Weight", "Target Weight",
+        "P/L", "P/L%", "Market Value", "Latest", "纪律分类", "触发提醒",
+        "年度配置项", "年度资金缺口", "年度完成率",
+    ]
+    ordered = [column for column in priority_columns if column in result.columns]
+    ordered += [column for column in result.columns if column not in ordered]
+    return result[ordered].reset_index(drop=True)
+
+
+def build_action_plan_view(
+    execution_plan: pd.DataFrame,
+    buy_filter: pd.DataFrame,
+    positions_sheet: pd.DataFrame,
+) -> pd.DataFrame:
+    """给动作计划补充证券账户仓位、目标与剩余额度。"""
+    if execution_plan.empty:
+        return execution_plan.copy()
+    result = execution_plan.copy()
+    if "Code" not in result.columns:
+        result["Code"] = result.get("标的", "").astype(str).str.extract(r"\(([^()]+)\)\s*$")[0]
+    result["Code"] = result["Code"].map(format_code)
+
+    position_lookup: dict[str, dict[str, float | None]] = {}
+    for _, row in positions_sheet.iterrows():
+        code = format_code(row.get("Code"))
+        weight = to_float(first_valid(row.get("Weight"), row.get("当前仓位")))
+        target = to_float(first_valid(row.get("Target Weight"), row.get("目标仓位")))
+        position_lookup[code] = {
+            "当前仓位": weight,
+            "目标仓位": target,
+            "剩余额度": max(target - weight, 0) if weight is not None and target is not None else None,
+        }
+    for _, row in buy_filter.iterrows():
+        code = format_code(row.get("Code"))
+        position_lookup[code] = {
+            "当前仓位": to_float(row.get("当前仓位")),
+            "目标仓位": to_float(row.get("目标仓位")),
+            "剩余额度": to_float(row.get("剩余额度")),
+        }
+
+    for column in ["当前仓位", "目标仓位", "剩余额度"]:
+        result[column] = result["Code"].map(lambda code: position_lookup.get(code, {}).get(column))
+    priority_columns = [
+        "优先级", "动作类型", "Code", "标的", "状态", "动作预算", "依据",
+        "当前仓位", "目标仓位", "剩余额度", "年度配置项", "年度资金缺口", "年度完成率",
+    ]
+    ordered = [column for column in priority_columns if column in result.columns]
+    ordered += [column for column in result.columns if column not in ordered]
+    return result[ordered].sort_values(["优先级", "动作类型"], kind="stable").reset_index(drop=True)
+
+
+def build_action_dashboard_view(
+    decision_center: pd.DataFrame,
+    action_plan: pd.DataFrame,
+    buy_candidates: pd.DataFrame,
+    position_risk: pd.DataFrame,
+    dashboard: pd.DataFrame,
+) -> pd.DataFrame:
+    """生成卡片式首页需要的四类结构化记录。"""
+    rows: list[dict[str, object]] = []
+
+    def decision_status(level: str, fallback: str) -> str:
+        if decision_center.empty or "层级" not in decision_center.columns:
+            return fallback
+        hit = decision_center[decision_center["层级"] == level]
+        return str(hit.iloc[0].get("状态", fallback)) if not hit.empty else fallback
+
+    def dashboard_value(item: str, fallback: str) -> str:
+        if dashboard.empty or not {"项目", "内容"}.issubset(dashboard.columns):
+            return fallback
+        hit = dashboard[dashboard["项目"] == item]
+        return str(hit.iloc[0].get("内容", fallback)) if not hit.empty else fallback
+
+    market_permission = decision_status("市场权限", "待确认")
+    candidate_count = 0
+    if not buy_candidates.empty and "买点灯号" in buy_candidates.columns:
+        candidate_count = int(buy_candidates["买点灯号"].isin(["绿", "黄"]).sum())
+        if market_permission != "开放买点复核":
+            candidate_count = 0
+    risk_count = int((position_risk.get("风险级别") == "红").sum()) if "风险级别" in position_risk.columns else 0
+    cash_status = dashboard_value("现金安全垫状态", "待确认")
+    core_statuses = [
+        ("市场权限", market_permission, "双锚、情绪和数据共同决定"),
+        ("买入候选", f"{candidate_count}只", "仅统计当前市场权限下可复核标的"),
+        ("减仓复核", f"{risk_count}项", "触发纪律或证券账户超配"),
+        ("现金安全垫", cash_status, "全资产与证券账户双口径"),
+    ]
+    for item, status, evidence in core_statuses:
+        rows.append({"区域": "核心状态", "项目": item, "状态": status, "证据": evidence, "动作": "查看对应明细"})
+
+    for _, row in action_plan.head(3).iterrows():
+        rows.append(
+            {
+                "区域": "今日动作",
+                "项目": row.get("标的", "未命名动作"),
+                "状态": row.get("动作类型", "观察"),
+                "证据": row.get("依据", ""),
+                "动作": row.get("状态", "待复核"),
+            }
+        )
+
+    if not buy_candidates.empty and "阻断原因" in buy_candidates.columns:
+        blockers = buy_candidates[
+            buy_candidates["阻断原因"].astype(str).str.strip().ne("")
+        ].head(3)
+        for _, row in blockers.iterrows():
+            rows.append(
+                {
+                    "区域": "主要阻断",
+                    "项目": row.get("Name", row.get("Code", "候选")),
+                    "状态": row.get("买点灯号", "灰"),
+                    "证据": row.get("阻断原因", ""),
+                    "动作": row.get("建议", "继续观察"),
+                }
+            )
+
+    quote_time = dashboard_value("行情数据时间", "未取到当日接口时间")
+    data_status = "行情未刷新" if any(key in quote_time for key in ("未取到", "未刷新", "缺失")) else "行情已刷新"
+    rows.append(
+        {
+            "区域": "数据状态",
+            "项目": "行情时间",
+            "状态": data_status,
+            "证据": quote_time,
+            "动作": "未刷新时禁止新增" if data_status == "行情未刷新" else "按纪律复核",
+        }
+    )
+    return pd.DataFrame(rows, columns=["区域", "项目", "状态", "证据", "动作"])
+
+
+def build_output_sheet_order(sheets: dict[str, pd.DataFrame]) -> list[str]:
+    """返回固定的前台六页顺序，并把明细页稳定地排在后面。"""
+    names = list(sheets)
+    ordered = [name for name in FRONT_SHEET_ORDER if name in sheets]
+    ordered += [name for name in DETAIL_SHEET_ORDER if name in sheets and name not in ordered]
+    ordered += [name for name in names if name not in ordered]
+    return ordered
+
+
 def style_excel_worksheet(ws, sheet_name: str) -> None:
     if ws.max_row < 1:
         return
@@ -2103,7 +2376,7 @@ def style_excel_worksheet(ws, sheet_name: str) -> None:
             for item in cell:
                 item.alignment = Alignment(vertical="center", wrap_text=width >= 18)
 
-    if sheet_name == "Buy_Filter":
+    if sheet_name in ("Buy_Filter", "03_买入候选"):
         for row in range(2, ws.max_row + 1):
             ws.row_dimensions[row].height = 38
         for col_name in ["通过明细", "未通过项", "待确认项", "否决原因", "建议"]:
@@ -2138,7 +2411,7 @@ def style_excel_worksheet(ws, sheet_name: str) -> None:
                 elif str(cell.value) == "否":
                     cell.fill = neutral_fill
 
-    if sheet_name in ("Buy_Filter", "Positions_Action"):
+    if sheet_name in ("Buy_Filter", "Positions_Action", "03_买入候选", "04_持仓风险"):
         for row in range(2, ws.max_row + 1):
             if row % 2 == 0:
                 for col_idx in range(1, ws.max_column + 1):
@@ -2154,6 +2427,23 @@ def style_excel_worksheet(ws, sheet_name: str) -> None:
             if col_idx:
                 for row in range(2, ws.max_row + 1):
                     ws.cell(row, col_idx).alignment = Alignment(vertical="center", wrap_text=True)
+
+    if sheet_name == "04_持仓风险" and headers.get("风险级别"):
+        risk_col = headers["风险级别"]
+        for row in range(2, ws.max_row + 1):
+            cell = ws.cell(row, risk_col)
+            cell.fill = bad_fill if str(cell.value) == "红" else watch_fill if str(cell.value) == "黄" else grey_fill
+            cell.font = Font(bold=True)
+            cell.alignment = Alignment(horizontal="center", vertical="center")
+            ws.row_dimensions[row].height = 34
+
+    if sheet_name == "02_今日动作" and headers.get("动作类型"):
+        action_col = headers["动作类型"]
+        for row in range(2, ws.max_row + 1):
+            cell = ws.cell(row, action_col)
+            text = str(cell.value or "")
+            cell.fill = bad_fill if "减仓" in text or "风控" in text else good_fill if "买入" in text else grey_fill
+            cell.font = Font(bold=True)
 
     if sheet_name == "Quality_Score" and headers.get("折算质量分"):
         col_letter = get_column_letter(headers["折算质量分"])
@@ -2224,11 +2514,123 @@ def style_excel_worksheet(ws, sheet_name: str) -> None:
                 ws.cell(row=row, column=col_idx).number_format = number_format
 
 
+def semantic_fill(value: object) -> PatternFill:
+    """首页状态卡的语义色。"""
+    text = str(value or "")
+    if any(key in text for key in ("暂停", "禁止", "未刷新", "超配", "红")):
+        return PatternFill("solid", fgColor="F4CCCC")
+    if any(key in text for key in ("复核", "观察", "待确认", "黄")):
+        return PatternFill("solid", fgColor="FFF2CC")
+    if any(key in text for key in ("开放", "达标", "已刷新", "绿")):
+        return PatternFill("solid", fgColor="D9EAD3")
+    return PatternFill("solid", fgColor="E7E6E6")
+
+
+def style_action_dashboard(ws, frame: pd.DataFrame) -> None:
+    """把结构化首页记录渲染为一屏可读的卡片式决策工作台。"""
+    ws.delete_rows(1, ws.max_row)
+    ws.sheet_view.showGridLines = False
+    ws.freeze_panes = "A8"
+    for column, width in {"A": 11, "B": 14, "C": 18, "D": 15, "E": 16, "F": 16, "G": 16, "H": 18}.items():
+        ws.column_dimensions[column].width = width
+
+    ws.merge_cells("A1:H1")
+    ws["A1"] = "V2.8.5 今日行动决策中心"
+    ws["A1"].fill = PatternFill("solid", fgColor="1F4E78")
+    ws["A1"].font = Font(color="FFFFFF", bold=True, size=18)
+    ws["A1"].alignment = Alignment(horizontal="left", vertical="center")
+    ws.row_dimensions[1].height = 30
+
+    core = frame[frame["区域"] == "核心状态"] if not frame.empty else pd.DataFrame()
+    permission = "待确认"
+    if not core.empty:
+        hit = core[core["项目"] == "市场权限"]
+        if not hit.empty:
+            permission = str(hit.iloc[0].get("状态", "待确认"))
+    action_count = int((frame["区域"] == "今日动作").sum()) if not frame.empty else 0
+    conclusion = "只做风控，不新增" if "暂停" in permission or "禁止" in permission else "允许按纪律复核买点"
+    ws.merge_cells("A2:H2")
+    ws["A2"] = f"今日结论：{conclusion}｜市场权限：{permission}｜动作队列：{action_count}项"
+    ws["A2"].fill = semantic_fill(permission)
+    ws["A2"].font = Font(bold=True, size=13, color="9C0006" if "暂停" in permission else "006100")
+    ws["A2"].alignment = Alignment(horizontal="left", vertical="center")
+    ws.row_dimensions[2].height = 26
+
+    card_ranges = [("A4:B4", "A5:B6"), ("C4:D4", "C5:D6"), ("E4:F4", "E5:F6"), ("G4:H4", "G5:H6")]
+    core_records = core.to_dict("records")[:4]
+    for index, (label_range, value_range) in enumerate(card_ranges):
+        ws.merge_cells(label_range)
+        ws.merge_cells(value_range)
+        label_cell = ws[label_range.split(":")[0]]
+        value_cell = ws[value_range.split(":")[0]]
+        record = core_records[index] if index < len(core_records) else {"项目": "待补", "状态": "待确认"}
+        label_cell.value = record.get("项目")
+        value_cell.value = record.get("状态")
+        label_cell.fill = PatternFill("solid", fgColor="D9EAF7")
+        label_cell.font = Font(bold=True, color="1F1F1F")
+        label_cell.alignment = Alignment(horizontal="center", vertical="center")
+        value_cell.fill = semantic_fill(record.get("状态"))
+        value_cell.font = Font(bold=True, size=15)
+        value_cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+
+    ws.merge_cells("A8:H8")
+    ws["A8"] = "今日动作（风控优先，最多一个买入方向 + 两个减仓方向）"
+    ws["A8"].fill = PatternFill("solid", fgColor="1F4E78")
+    ws["A8"].font = Font(color="FFFFFF", bold=True)
+    action_headers = ["顺序", "动作类型", "标的", "状态", "核心依据"]
+    for column, value in enumerate(action_headers, start=1):
+        cell = ws.cell(9, column, value)
+        cell.fill = PatternFill("solid", fgColor="D9EAF7")
+        cell.font = Font(bold=True)
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+    ws.merge_cells("E9:H9")
+    action_rows = frame[frame["区域"] == "今日动作"].head(3) if not frame.empty else pd.DataFrame()
+    for offset, (_, record) in enumerate(action_rows.iterrows(), start=10):
+        values = [offset - 9, record.get("状态"), record.get("项目"), record.get("动作"), record.get("证据")]
+        for column, value in enumerate(values[:4], start=1):
+            ws.cell(offset, column, value)
+        ws.merge_cells(start_row=offset, start_column=5, end_row=offset, end_column=8)
+        ws.cell(offset, 5, values[4])
+        for column in range(1, 9):
+            ws.cell(offset, column).alignment = Alignment(vertical="center", wrap_text=True)
+        ws.row_dimensions[offset].height = 30
+
+    blocker_start = 14
+    ws.merge_cells(start_row=blocker_start, start_column=1, end_row=blocker_start, end_column=8)
+    ws.cell(blocker_start, 1, "主要阻断原因")
+    ws.cell(blocker_start, 1).fill = PatternFill("solid", fgColor="7F6000")
+    ws.cell(blocker_start, 1).font = Font(color="FFFFFF", bold=True)
+    blockers = frame[frame["区域"] == "主要阻断"].head(3) if not frame.empty else pd.DataFrame()
+    for offset, (_, record) in enumerate(blockers.iterrows(), start=blocker_start + 1):
+        ws.cell(offset, 1, record.get("项目"))
+        ws.cell(offset, 2, record.get("状态"))
+        ws.merge_cells(start_row=offset, start_column=3, end_row=offset, end_column=6)
+        ws.cell(offset, 3, record.get("证据"))
+        ws.merge_cells(start_row=offset, start_column=7, end_row=offset, end_column=8)
+        ws.cell(offset, 7, record.get("动作"))
+        for column in range(1, 9):
+            ws.cell(offset, column).alignment = Alignment(vertical="center", wrap_text=True)
+        ws.row_dimensions[offset].height = 28
+
+    data_row = frame[frame["区域"] == "数据状态"].head(1) if not frame.empty else pd.DataFrame()
+    ws.merge_cells("A19:H20")
+    if not data_row.empty:
+        record = data_row.iloc[0]
+        ws["A19"] = f"数据状态：{record.get('状态')}｜{record.get('证据')}｜{record.get('动作')}"
+        ws["A19"].fill = semantic_fill(record.get("状态"))
+    else:
+        ws["A19"] = "数据状态：待确认"
+        ws["A19"].fill = semantic_fill("待确认")
+    ws["A19"].font = Font(bold=True)
+    ws["A19"].alignment = Alignment(vertical="center", wrap_text=True)
+
+
 def add_dashboard_chart(wb: Workbook) -> None:
     """Add one decision-useful native Excel chart: current versus target weights."""
-    if "Dashboard" not in wb.sheetnames or "Positions" not in wb.sheetnames:
+    dashboard_name = "06_组合总览" if "06_组合总览" in wb.sheetnames else "Dashboard"
+    if dashboard_name not in wb.sheetnames or "Positions" not in wb.sheetnames:
         return
-    dashboard = wb["Dashboard"]
+    dashboard = wb[dashboard_name]
     positions = wb["Positions"]
     headers = {cell.value: cell.column for cell in positions[1]}
     if not {"Name", "Weight", "Target Weight"}.issubset(headers):
@@ -2263,10 +2665,12 @@ def add_dashboard_chart(wb: Workbook) -> None:
 
 def add_first_year_chart(wb: Workbook) -> None:
     """在Dashboard加入第一年动态目标金额与当前金额对比。"""
-    if "Dashboard" not in wb.sheetnames or "FirstYear_Allocation" not in wb.sheetnames:
+    dashboard_name = "06_组合总览" if "06_组合总览" in wb.sheetnames else "Dashboard"
+    allocation_name = "05_年度配置" if "05_年度配置" in wb.sheetnames else "FirstYear_Allocation"
+    if dashboard_name not in wb.sheetnames or allocation_name not in wb.sheetnames:
         return
-    dashboard = wb["Dashboard"]
-    allocation = wb["FirstYear_Allocation"]
+    dashboard = wb[dashboard_name]
+    allocation = wb[allocation_name]
     headers = {cell.value: cell.column for cell in allocation[1]}
     required = {"配置项", "按当前全资产目标金额", "最新持仓金额"}
     if not required.issubset(headers):
@@ -2299,7 +2703,8 @@ def write_excel(output_path: Path, sheets: dict[str, pd.DataFrame]) -> None:
     default_sheet = wb.active
     wb.remove(default_sheet)
 
-    for sheet_name, df in sheets.items():
+    for sheet_name in build_output_sheet_order(sheets):
+        df = sheets[sheet_name]
         ws = wb.create_sheet(title=sheet_name[:31])
         export_df = df.copy()
         if "Code" in export_df.columns:
@@ -2317,12 +2722,16 @@ def write_excel(output_path: Path, sheets: dict[str, pd.DataFrame]) -> None:
             if cell.value is not None:
                 cell.value = format_code(cell.value)
 
-        style_excel_worksheet(ws, sheet_name)
+        if sheet_name == "01_今日决策":
+            style_action_dashboard(ws, export_df)
+        else:
+            style_excel_worksheet(ws, sheet_name)
 
     add_dashboard_chart(wb)
     add_first_year_chart(wb)
-    if "Dashboard" in wb.sheetnames:
-        ws = wb["Dashboard"]
+    dashboard_name = "06_组合总览" if "06_组合总览" in wb.sheetnames else "Dashboard"
+    if dashboard_name in wb.sheetnames:
+        ws = wb[dashboard_name]
         percentage_labels = {
             "券商截图总仓位", "全资产权益穿透仓位", "证券账户可用现金比例",
             "第一年配置目标占比", "第一年当前已配置占比", "第一年配置完成率", "第一年未配置目标占比",
@@ -2700,26 +3109,39 @@ def main() -> int:
     execution_plan = build_execution_plan(buy_filter, positions_action, positions_sheet, first_year)
     decision_center = build_decision_center(double_anchor, emotion, quality_score, buy_filter, positions_action, first_year_summary)
     dashboard = build_dashboard(account_meta, alerts, market_data, double_anchor, emotion, buy_filter, quality_score, positions_sheet, decision_inputs, first_year_summary)
+    portfolio_overview = build_portfolio_overview(dashboard)
+    permission_row = decision_center[decision_center["层级"] == "市场权限"]
+    market_permission = str(permission_row.iloc[0]["状态"]) if not permission_row.empty else "待确认"
+    buy_candidates = build_buy_candidates_view(buy_filter, market_permission)
+    position_risk = build_position_risk_view(positions_action, positions_sheet)
+    action_plan = build_action_plan_view(execution_plan, buy_filter, positions_sheet)
+    action_dashboard = build_action_dashboard_view(
+        decision_center,
+        action_plan,
+        buy_candidates,
+        position_risk,
+        dashboard,
+    )
 
     # 把原始 watchlist 也写进去，方便对照
     output_xlsx = make_output_xlsx_path()
     sheets = {
-        "Decision_Center": decision_center,
-        "Dashboard": dashboard,
-        "FirstYear_Allocation": first_year,
-        "Execution_Plan": execution_plan,
-        "Checks": checks,
-        "Framework_Rules": rules,
+        "01_今日决策": action_dashboard,
+        "02_今日动作": action_plan,
+        "03_买入候选": buy_candidates,
+        "04_持仓风险": position_risk,
+        "05_年度配置": first_year,
+        "06_组合总览": portfolio_overview,
         "Double_Anchor": double_anchor,
         "Emotion": emotion,
         "Quality_Score": quality_score,
         "Exposure": exposure,
         "Market_Data": market_data,
-        "Buy_Filter": buy_filter,
         "Positions": positions_sheet,
-        "Positions_Action": positions_action,
         "Broker_Snapshot": broker_snapshot,
         "Watchlist": watchlist_output,
+        "Framework_Rules": rules,
+        "Checks": checks,
         "使用说明": pd.DataFrame(
             [
                 {"步骤": "1", "操作": "编辑 watchlist.csv", "说明": "维护观察池代码、角色、目标权重"},
@@ -2728,7 +3150,7 @@ def main() -> int:
                 {"步骤": "4", "操作": "编辑 first_year_allocation.csv", "说明": "维护第一年全资产目标、代码映射、收益观察区间与执行约束；年度缺口不是买入信号"},
                 {"步骤": "5", "操作": "编辑 positions.csv", "说明": "维护持仓数量、成本、账户总资产和券商截图持仓快照"},
                 {"步骤": "6", "操作": "运行 python main.py", "说明": "抓取行情并生成 Excel"},
-                {"步骤": "7", "操作": f"打开 output 文件夹里最新的 {FRAMEWORK_VERSION}_每日行情输出_日期时间.xlsx", "说明": "先看 Decision_Center / FirstYear_Allocation / Execution_Plan / Checks，再看 Dashboard / Quality_Score / Exposure / Buy_Filter"},
+                {"步骤": "7", "操作": f"打开 output 文件夹里最新的 {FRAMEWORK_VERSION}_每日行情输出_日期时间.xlsx", "说明": "按顺序查看 01_今日决策、02_今日动作、03_买入候选、04_持仓风险、05_年度配置和06_组合总览"},
                 {"步骤": "8", "操作": "理解双口径", "说明": "第一年目标使用全资产口径；证券账户目标继续作为集中度硬约束"},
                 {"步骤": "9", "操作": "理解数据边界", "说明": "缺失项不得自动判绿；代理分不折算为完整评分"},
             ]
@@ -2739,7 +3161,7 @@ def main() -> int:
 
     print()
     print(f"已生成 Excel：{output_xlsx}")
-    print("请先查看 Decision_Center、Execution_Plan 和 Checks，再查看 Dashboard、Emotion、Quality_Score、Exposure 和 Buy_Filter。")
+    print("请先查看 01_今日决策、02_今日动作、03_买入候选和04_持仓风险，再查看年度配置与组合总览。")
     if market_data["Latest"].isna().any():
         print("注意：部分代码未取到行情，可能是网络问题、代码错误或接口暂时不可用。")
     return 0

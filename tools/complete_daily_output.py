@@ -286,8 +286,9 @@ def complete_workbook(path: Path) -> Path:
             note_text = str(note or "").replace("；未取到行情，使用券商截图价格", "").replace("；未取到行情", "")
             set_value(ws, row, headers, "Notes", (note_text + "；行情已补齐").strip("；"))
 
-    if "Buy_Filter" in wb.sheetnames:
-        ws = wb["Buy_Filter"]
+    buy_sheet = "03_买入候选" if "03_买入候选" in wb.sheetnames else "Buy_Filter"
+    if buy_sheet in wb.sheetnames:
+        ws = wb[buy_sheet]
         headers = header_map(ws)
         for row in range(2, ws.max_row + 1):
             code = normalize_code(ws.cell(row, headers["Code"]).value)
@@ -300,8 +301,9 @@ def complete_workbook(path: Path) -> Path:
             for key in ["日内位置", "量能倍数", "分时结构", "量价关系", "份额变动", "龙头成分", "次日验证", "通过项", "一票否决", "否决原因", "建议"]:
                 set_value(ws, row, headers, key, result.get(key))
 
-    if "Positions_Action" in wb.sheetnames:
-        ws = wb["Positions_Action"]
+    risk_sheet = "04_持仓风险" if "04_持仓风险" in wb.sheetnames else "Positions_Action"
+    if risk_sheet in wb.sheetnames:
+        ws = wb[risk_sheet]
         headers = header_map(ws)
         for row in range(2, ws.max_row + 1):
             code = normalize_code(ws.cell(row, headers["Code"]).value)
@@ -347,7 +349,7 @@ def complete_workbook(path: Path) -> Path:
                 set_value(ws, row, headers, "灯号", combined)
                 set_value(ws, row, headers, "说明", "允许研究买入，但仍需买点过滤器" if combined == "双绿" else "继续观察")
 
-    for sheet_name in ["Market_Data", "Buy_Filter", "Positions_Action", "Double_Anchor"]:
+    for sheet_name in ["Market_Data", buy_sheet, risk_sheet, "Double_Anchor"]:
         if sheet_name in wb.sheetnames:
             ws = wb[sheet_name]
             for col in ws.columns:

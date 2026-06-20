@@ -28,17 +28,18 @@ def replace_sheet(wb, name: str, frame: pd.DataFrame, index: int) -> None:
 def run(source: Path) -> Path:
     sheets = pd.read_excel(
         source,
-        sheet_name=["Buy_Filter", "Positions_Action", "Positions", "FirstYear_Allocation"],
+        sheet_name=["03_买入候选", "04_持仓风险", "Positions", "05_年度配置"],
         dtype={"Code": str},
     )
     execution = main.build_execution_plan(
-        sheets["Buy_Filter"],
-        sheets["Positions_Action"],
+        sheets["03_买入候选"],
+        sheets["04_持仓风险"],
         sheets["Positions"],
-        sheets["FirstYear_Allocation"],
+        sheets["05_年度配置"],
     )
+    execution = main.build_action_plan_view(execution, sheets["03_买入候选"], sheets["Positions"])
     wb = load_workbook(source)
-    replace_sheet(wb, "Execution_Plan", execution, 2)
+    replace_sheet(wb, "02_今日动作", execution, 1)
     output = source.with_name(f"{main.FRAMEWORK_VERSION}_每日行情输出_{datetime.now():%Y%m%d_%H%M%S}.xlsx")
     wb.save(output)
     return output
