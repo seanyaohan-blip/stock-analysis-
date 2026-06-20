@@ -1,0 +1,20 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+
+# Codex / local runtime caches
+.codex-work/
+.codex_tmp/
+.superpowers/
+node_modules
+tools/node_modules
+.pip-cache/
+
+# Generated reports are retained locally but rebuilt from source
+output/
+premarket_report/output/
+*.inspect.ndjson
+
+# Superseded template retained only until the approved cleanup runs
+V2.8.4_ETF_A股纪律仪表盘模板.xlsx
+

@@ -1,0 +1,9 @@
+Key,Value,AsOf,Source,Notes
+emotion_temperature,,,,填写1-5；空白时仅使用观察池行情代理并标记低可靠性
+media_heat,,,,财经媒体热度，填写1-5（可选）
+community_heat,,,,社区讨论热度，填写1-5（可选）
+etf_flow_heat,,,,ETF申赎热度，填写1-5（可选）
+margin_heat,,,,融资余额热度，填写1-5（可选）
+limit_up_heat,,,,板块涨停热度，填写1-5（可选）
+cash_buffer_min,300000,,V2.8.5,全资产最低流动性安全垫
+cash_buffer_target,500000,,V2.8.5,全资产目标流动性安全垫

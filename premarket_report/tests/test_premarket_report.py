@@ -1,0 +1,69 @@
+from datetime import datetime
+from pathlib import Path
+import sys
+import unittest
+
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+import main
+from docx import Document
+from docx.oxml.ns import qn
+
+
+class PremarketReportTests(unittest.TestCase):
+    def test_parse_time_normalizes_utc_to_shanghai(self):
+        self.assertEqual(
+            main.parse_time("Thu, 18 Jun 2026 21:14:00 GMT"),
+            "2026-06-19 05:14",
+        )
+
+    def test_parse_time_normalizes_chinese_date(self):
+        self.assertEqual(main.parse_time("2026年6月18日"), "2026-06-18 00:00")
+
+    def test_infer_news_time_from_dated_url(self):
+        self.assertEqual(
+            main.infer_news_time_from_url(
+                "http://www.pbc.gov.cn/example/2026061810473541154/index.html"
+            ),
+            "2026-06-18",
+        )
+        self.assertEqual(
+            main.infer_news_time_from_url(
+                "https://www.ndrc.gov.cn/example/t20260618_1405995.html"
+            ),
+            "2026-06-18",
+        )
+
+    def test_market_timestamp_uses_shanghai_timezone(self):
+        timestamp = int(datetime.fromisoformat("2026-06-19T01:00:00+00:00").timestamp())
+        self.assertEqual(
+            main.timestamp_to_shanghai(timestamp),
+            "2026-06-19 09:00",
+        )
+
+    def test_source_attempt_summary_records_retry_and_fallback(self):
+        summary = main.format_source_attempt_summary(
+            "财联社",
+            [
+                ("https://www.cls.cn/telegraph", "HTTP成功但0条近3日有效新闻"),
+                ("https://www.cls.cn/telegraph", "重试后仍为0条"),
+                ("Google News site:cls.cn", "备用源成功，6条"),
+            ],
+        )
+        self.assertIn("财联社", summary)
+        self.assertIn("重试", summary)
+        self.assertIn("备用源成功", summary)
+
+    def test_table_geometry_sets_explicit_dxa_indent(self):
+        doc = Document()
+        table = doc.add_table(rows=1, cols=2)
+        main.set_table_geometry(table, [3.0, 3.5])
+        tbl_indent = table._tbl.tblPr.first_child_found_in("w:tblInd")
+        self.assertIsNotNone(tbl_indent)
+        self.assertEqual(tbl_indent.get(qn("w:type")), "dxa")
+        self.assertEqual(tbl_indent.get(qn("w:w")), "120")
+
+
+if __name__ == "__main__":
+    unittest.main()

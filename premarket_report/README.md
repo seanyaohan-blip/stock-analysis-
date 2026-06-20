@@ -1,0 +1,60 @@
+# A股盘前情报报告项目
+
+这个项目用于每天 A股开盘前生成盘前情报报告。
+
+它只做三件事：
+1. 读取父目录 `output` 文件夹里最新的 `V2.8.5_每日行情输出*.xlsx`；
+2. 抓取隔夜行情和新闻；
+3. 输出 Word 报告到本目录的 `output` 文件夹。
+
+它不会连接券商账户，不会下单，不会自动交易，也不会生成直接买入建议。
+
+## 使用方法
+
+第一次使用：
+
+```bash
+cd /Users/seany/Library/CloudStorage/OneDrive-个人/V284_ETF_Dashboard/premarket_report
+pip install -r requirements.txt
+```
+
+每天开盘前运行：
+
+```bash
+python main.py
+```
+
+只检查文档结构与版式、暂不联网时：
+
+```bash
+python main.py --offline
+```
+
+离线模式会明确标注“隔夜行情与新闻待联网更新”，不会把旧数据伪装成最新情报。
+
+生成文件示例：
+
+```text
+output/V2.8.5_A股盘前决策简报_20260619_083000.docx
+```
+
+程序会自动读取父目录 `output` 文件夹里最新的 `V2.8.5_每日行情输出*.xlsx`，并优先使用
+`Decision_Center`、`FirstYear_Allocation`、`Execution_Plan`、`Checks`、`Emotion`、`Quality_Score` 与 `Exposure`。
+
+报告中的“第一年度配置进度”使用全资产口径，展示动态目标、当前映射金额、资金缺口和完成率。
+年度缺口只表示长期规划空间，不能绕过质量准入、买点过滤或证券账户仓位上限。
+
+质量评分、ETF份额/IOPV、龙头同步或次日验证缺失时，报告只输出条件式复核，不会把代理数据写成可执行结论。
+
+## 新闻源维护
+
+新闻源在 `news_sources.csv` 中维护。
+
+字段说明：
+- `Source`：来源名称；
+- `Group`：报告分组，只使用 `官方源`、`国际源`、`国内快讯`；
+- `Type`：抓取方式，支持 `rss`、`html`、`cls_api`；
+- `URL`：新闻源地址；
+- `Limit`：每个来源最多保留几条。
+
+如果某个网站临时抓取失败，程序会继续生成报告，并在报告末尾写入抓取提示。

@@ -1,0 +1,11 @@
+Source,Group,Type,URL,Limit
+Reuters,国际源,rss,https://news.google.com/rss/search?q=site%3Areuters.com%20%28markets%20OR%20China%20OR%20Federal%20Reserve%20OR%20stocks%20OR%20semiconductor%29&hl=en-US&gl=US&ceid=US:en,6
+CNBC,国际源,rss,https://www.cnbc.com/id/100003114/device/rss/rss.html,6
+MarketWatch,国际源,rss,https://feeds.content.dowjones.io/public/rss/mw_marketpulse,6
+财联社,国内快讯,html,https://www.cls.cn/telegraph,8
+证券时报,国内快讯,html,https://www.stcn.com/,6
+中国政府网,官方源,html,https://www.gov.cn/yaowen/,6
+央行,官方源,html,http://www.pbc.gov.cn/goutongjiaoliu/113456/113469/index.html,6
+证监会,官方源,html,http://www.csrc.gov.cn/csrc/index.shtml,6
+发改委,官方源,html,https://www.ndrc.gov.cn/xwdt/xwfb/,6
+工信部,官方源,html,https://www.miit.gov.cn/xwdt/gxdt/,6
