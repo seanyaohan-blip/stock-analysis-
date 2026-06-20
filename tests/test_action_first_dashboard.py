@@ -265,7 +265,17 @@ class ActionFirstDashboardTests(unittest.TestCase):
         )
         sheets = {
             "Checks": pd.DataFrame([{"检查项": "测试", "状态": "OK"}]),
-            "03_买入候选": pd.DataFrame([{"买点灯号": "红", "Code": "000001", "阻断原因": "测试"}]),
+            "03_买入候选": pd.DataFrame(
+                [
+                    {
+                        "买点灯号": "红",
+                        "Code": "000001",
+                        "Name": "测试标的",
+                        "建议买入区间": "暂不建议买入（测试）",
+                        "阻断原因": "测试",
+                    }
+                ]
+            ),
             "01_今日决策": dashboard_view,
             "06_组合总览": pd.DataFrame([{"项目": "测试", "内容": "测试"}]),
             "04_持仓风险": pd.DataFrame([{"风险级别": "红", "Code": "000001", "触发原因": "测试"}]),
@@ -280,6 +290,18 @@ class ActionFirstDashboardTests(unittest.TestCase):
             workbook = load_workbook(path, read_only=False)
             self.assertEqual(workbook.sheetnames[:6], main.FRONT_SHEET_ORDER)
             self.assertIn("A1:H1", {str(item) for item in workbook["01_今日决策"].merged_cells.ranges})
+            candidate_headers = [cell.value for cell in workbook["03_买入候选"][1]]
+            self.assertEqual(candidate_headers[3], "建议买入区间")
+            self.assertGreaterEqual(workbook["03_买入候选"].column_dimensions["D"].width, 24)
+
+    def test_framework_rules_document_buy_range_as_review_only(self):
+        rules = main.build_framework_rules({})
+        matching = rules[rules["规则"] == "建议买入区间"]
+
+        self.assertEqual(len(matching), 1)
+        definition = str(matching.iloc[0]["阈值/定义"])
+        self.assertIn("复核", definition)
+        self.assertIn("不自动", definition)
 
     def test_portfolio_overview_removes_per_position_alert_rows(self):
         dashboard = pd.DataFrame(

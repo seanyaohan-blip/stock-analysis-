@@ -110,7 +110,7 @@ def main(path: Path) -> int:
             "LeaderStatus", "PrevDayLow", "PrevDayLowSource", "QuoteTime", "DataSource",
         ],
         "03_买入候选": [
-            "Code", "Name", "Latest", "PctChg", "日内位置", "量能倍数", "分时结构",
+            "Code", "Name", "建议买入区间", "Latest", "PctChg", "日内位置", "量能倍数", "分时结构",
             "量价关系", "份额变动", "折溢价", "龙头同步", "次日验证", "通过项",
             "通过明细", "未通过项", "待确认项", "一票否决", "否决原因", "建议", "阻断原因", "数据状态",
         ],
@@ -191,14 +191,46 @@ def main(path: Path) -> int:
     candidate_ws = wb["03_买入候选"]
     candidate_headers = headers(candidate_ws)
     missing_red_blockers = []
+    blank_buy_ranges = []
+    stale_numeric_ranges = []
+    unsafe_blocked_numeric_ranges = []
+    numeric_range_pattern = re.compile(r"\d+(?:\.\d+)?–\d+(?:\.\d+)?")
     for row in range(2, candidate_ws.max_row + 1):
+        range_text = str(candidate_ws.cell(row, candidate_headers["建议买入区间"]).value or "").strip()
+        if not range_text:
+            blank_buy_ranges.append(row)
+        has_numeric_range = bool(numeric_range_pattern.search(range_text))
+        data_status = str(candidate_ws.cell(row, candidate_headers.get("数据状态", 1)).value or "")
+        signal = str(candidate_ws.cell(row, candidate_headers["买点灯号"]).value or "")
+        position_status = str(candidate_ws.cell(row, candidate_headers.get("仓位状态", 1)).value or "")
+        blocker = str(candidate_ws.cell(row, candidate_headers["阻断原因"]).value or "")
+        full_position_exception = (
+            range_text.startswith("暂不建议买入；")
+            and ("已达目标" in position_status or "超目标" in position_status)
+            and "仓位" in blocker
+        )
+        if has_numeric_range and data_status == "行情未刷新":
+            stale_numeric_ranges.append(row)
+        if has_numeric_range and signal not in {"绿", "黄"} and not full_position_exception:
+            unsafe_blocked_numeric_ranges.append(row)
         if str(candidate_ws.cell(row, candidate_headers["买点灯号"]).value) != "红":
             continue
-        blocker = candidate_ws.cell(row, candidate_headers["阻断原因"]).value
         if blocker in (None, ""):
             missing_red_blockers.append(row)
     result["checks"]["red_candidate_blockers_complete"] = not missing_red_blockers
     result["checks"]["red_candidate_missing_blocker_rows"] = missing_red_blockers
+    result["checks"]["buy_range_text_complete"] = not blank_buy_ranges
+    result["checks"]["buy_range_blank_rows"] = blank_buy_ranges
+    result["checks"]["stale_rows_have_no_numeric_range"] = not stale_numeric_ranges
+    result["checks"]["stale_numeric_range_rows"] = stale_numeric_ranges
+    result["checks"]["blocked_numeric_ranges_safe"] = not unsafe_blocked_numeric_ranges
+    result["checks"]["unsafe_blocked_numeric_range_rows"] = unsafe_blocked_numeric_ranges
+    if blank_buy_ranges:
+        result["issues"].append(f"Blank suggested buy range text at rows: {blank_buy_ranges}")
+    if stale_numeric_ranges:
+        result["issues"].append(f"Stale rows contain numeric buy ranges: {stale_numeric_ranges}")
+    if unsafe_blocked_numeric_ranges:
+        result["issues"].append(f"Blocked rows contain unsafe numeric buy ranges: {unsafe_blocked_numeric_ranges}")
 
     dashboard_ws = wb["06_组合总览"]
     dashboard = {

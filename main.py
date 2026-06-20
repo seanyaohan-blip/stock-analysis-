@@ -1415,6 +1415,12 @@ def build_framework_rules(
         ("质量准入", "禁止新增", f"完整评分 < {QUALITY_OBSERVE_MIN:.0f}；或缺少完整评分/证据", "V2.8.5 第三部分"),
         ("买点过滤", "标准首批", f"六项中通过 ≥ {BUY_STANDARD_MIN}，且无一票否决", "V2.8.5 第六部分"),
         ("买点过滤", "半额首批", f"六项中通过 = {BUY_HALF_MIN}，且无一票否决", "V2.8.5 第六部分"),
+        (
+            "买点过滤",
+            "建议买入区间",
+            "完整近期行情下按昨日低点与日内回踩区间复核；仓位已满仅保留观察区间；不自动下单",
+            "V2.8.4/V2.8.5 买点与行为纪律",
+        ),
         ("情绪纪律", "暂停新增", f"情绪温度 ≥ {EMOTION_PAUSE_LEVEL}", "V2.8.5 第八部分"),
         ("执行纪律", "单日动作上限", "一个买入方向 + 两个卖出/减仓方向", "V2.8.4/V2.8.5"),
         ("现金安全垫", "最低值", f"{cash_min:,.0f}元", "V2.8.4 第十三部分"),
@@ -2377,6 +2383,7 @@ def style_excel_worksheet(ws, sheet_name: str) -> None:
     default_widths = {
         "Code": 12,
         "Name": 18,
+        "建议买入区间": 32,
         "Role": 14,
         "质量评分": 11,
         "质量状态": 22,
@@ -2449,7 +2456,7 @@ def style_excel_worksheet(ws, sheet_name: str) -> None:
     if sheet_name in ("Buy_Filter", "03_买入候选"):
         for row in range(2, ws.max_row + 1):
             ws.row_dimensions[row].height = 38
-        for col_name in ["通过明细", "未通过项", "待确认项", "否决原因", "建议"]:
+        for col_name in ["建议买入区间", "通过明细", "未通过项", "待确认项", "否决原因", "建议"]:
             col_idx = headers.get(col_name)
             if col_idx:
                 for row in range(2, ws.max_row + 1):
