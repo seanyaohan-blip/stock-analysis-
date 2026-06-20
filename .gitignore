@@ -6,6 +6,7 @@ __pycache__/
 .codex-work/
 .codex_tmp/
 .superpowers/
+.worktrees/
 node_modules
 tools/node_modules
 .pip-cache/
@@ -17,4 +18,3 @@ premarket_report/output/
 
 # Superseded template retained only until the approved cleanup runs
 V2.8.4_ETF_A股纪律仪表盘模板.xlsx
-
