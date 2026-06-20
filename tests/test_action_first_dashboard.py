@@ -2,6 +2,7 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+from datetime import datetime
 
 import pandas as pd
 from openpyxl import load_workbook
@@ -13,6 +14,48 @@ import main
 
 
 class ActionFirstDashboardTests(unittest.TestCase):
+    def test_calculate_buy_range_uses_pullback_band_for_etf(self):
+        result = main.calculate_buy_range(
+            code="159516",
+            name="半导体设备ETF",
+            signal="绿",
+            latest=1.520,
+            high=1.550,
+            low=1.480,
+            prev_close=1.510,
+            prev_day_low=1.490,
+        )
+
+        self.assertEqual(result, (1.498, 1.515))
+
+    def test_calculate_buy_range_uses_stricter_yellow_band_for_stock(self):
+        result = main.calculate_buy_range(
+            code="002594",
+            name="比亚迪",
+            signal="黄",
+            latest=90.00,
+            high=92.00,
+            low=86.00,
+            prev_close=89.00,
+            prev_day_low=86.50,
+        )
+
+        self.assertEqual(result, (86.90, 88.10))
+
+    def test_quote_is_recent_accepts_friday_on_saturday(self):
+        self.assertTrue(
+            main.is_recent_complete_quote(
+                "2026-06-19 15:00:00",
+                now=datetime(2026, 6, 20, 10, 0, 0),
+            )
+        )
+
+    def test_quote_is_recent_rejects_missing_or_old_timestamp(self):
+        now = datetime(2026, 6, 20, 10, 0, 0)
+
+        self.assertFalse(main.is_recent_complete_quote(None, now=now))
+        self.assertFalse(main.is_recent_complete_quote("2026-06-15 15:00:00", now=now))
+
     def test_buy_candidates_keep_all_rows_and_sort_by_signal(self):
         buy_filter = pd.DataFrame(
             [

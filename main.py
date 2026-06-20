@@ -22,6 +22,7 @@ import subprocess
 import time
 import urllib.request
 from datetime import datetime, time as dt_time
+from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 
 import pandas as pd
@@ -148,6 +149,69 @@ def to_float(value) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def is_recent_complete_quote(quote_time, now: datetime | None = None) -> bool:
+    """行情必须有有效时间，且不得早于当前日期三个自然日。"""
+    if quote_time is None or str(quote_time).strip() in {"", "nan", "None"}:
+        return False
+    try:
+        parsed = pd.to_datetime(quote_time, errors="raise")
+        quote_dt = parsed.to_pydatetime() if hasattr(parsed, "to_pydatetime") else parsed
+    except (TypeError, ValueError):
+        return False
+    current = now or datetime.now()
+    age_days = (current.date() - quote_dt.date()).days
+    return 0 <= age_days <= 3
+
+
+def price_tick(code: str, name: str) -> float:
+    """ETF 使用千分位报价，普通 A 股使用分位报价。"""
+    code_text = format_code(code).split(".")[0]
+    if "ETF" in str(name).upper() or code_text.startswith(("15", "16", "51", "56", "58")):
+        return 0.001
+    return 0.01
+
+
+def round_to_tick(value: float, tick: float) -> float:
+    """按证券最小价格变动单位四舍五入。"""
+    decimal_tick = Decimal(str(tick))
+    rounded_units = (Decimal(str(value)) / decimal_tick).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+    return float(rounded_units * decimal_tick)
+
+
+def calculate_buy_range(
+    code: str,
+    name: str,
+    signal: str,
+    latest,
+    high,
+    low,
+    prev_close,
+    prev_day_low,
+) -> tuple[float, float] | None:
+    """按 V2.8.5 的回踩、不追高和昨日低点纪律计算复核区间。"""
+    values = [to_float(item) for item in (latest, high, low, prev_close, prev_day_low)]
+    if any(item is None for item in values) or signal not in {"绿", "黄"}:
+        return None
+    latest_f, high_f, low_f, prev_close_f, prev_day_low_f = values
+    intraday_range = high_f - low_f
+    if intraday_range <= 0 or min(values) <= 0:
+        return None
+
+    if signal == "绿":
+        lower = max(prev_day_low_f, low_f + intraday_range * 0.25)
+        upper = min(latest_f, prev_close_f * 1.005, low_f + intraday_range * 0.50)
+    else:
+        lower = max(prev_day_low_f, low_f + intraday_range * 0.15)
+        upper = min(latest_f * 0.995, prev_close_f, low_f + intraday_range * 0.35)
+
+    tick = price_tick(code, name)
+    lower_rounded = round_to_tick(lower, tick)
+    upper_rounded = round_to_tick(upper, tick)
+    if upper_rounded < lower_rounded:
+        return None
+    return lower_rounded, upper_rounded
 
 
 def first_valid(*values):
