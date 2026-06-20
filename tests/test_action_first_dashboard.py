@@ -56,6 +56,93 @@ class ActionFirstDashboardTests(unittest.TestCase):
         self.assertFalse(main.is_recent_complete_quote(None, now=now))
         self.assertFalse(main.is_recent_complete_quote("2026-06-15 15:00:00", now=now))
 
+    def test_format_buy_range_allows_full_position_observation_exception(self):
+        text = main.format_buy_range_recommendation(
+            code="159516",
+            name="半导体设备ETF",
+            technical_signal="绿",
+            latest=1.520,
+            high=1.550,
+            low=1.480,
+            prev_close=1.510,
+            prev_day_low=1.490,
+            quote_time="2026-06-19 15:00:00",
+            data_source="东方财富补齐",
+            hard_block_kind="position_full",
+            hard_block_reason="当前仓位已达目标仓位",
+            veto_reason="无",
+            now=datetime(2026, 6, 20, 10, 0, 0),
+        )
+
+        self.assertEqual(text, "暂不建议买入；下一交易日观察区间 1.498–1.515")
+
+    def test_format_buy_range_suppresses_other_hard_blocks(self):
+        text = main.format_buy_range_recommendation(
+            code="159516",
+            name="半导体设备ETF",
+            technical_signal="绿",
+            latest=1.520,
+            high=1.550,
+            low=1.480,
+            prev_close=1.510,
+            prev_day_low=1.490,
+            quote_time="2026-06-19 15:00:00",
+            data_source="东方财富补齐",
+            hard_block_kind="quality",
+            hard_block_reason="质量评分不足",
+            veto_reason="无",
+            now=datetime(2026, 6, 20, 10, 0, 0),
+        )
+
+        self.assertEqual(text, "暂不建议买入（质量评分不足）")
+        self.assertNotRegex(text, r"\d+\.\d+–\d+\.\d+")
+
+    def test_market_permission_removes_numeric_range(self):
+        source = pd.DataFrame(
+            [
+                {
+                    "买点灯号": "绿",
+                    "Code": "159516",
+                    "Name": "半导体设备ETF",
+                    "建议买入区间": "标准复核区间 1.498–1.515",
+                    "建议": "复核",
+                    "否决原因": "",
+                    "通过项": 5,
+                    "质量评分": 9.0,
+                    "剩余额度": 0.02,
+                    "Latest": 1.52,
+                    "PctChg": 0.6,
+                }
+            ]
+        )
+
+        result = main.build_buy_candidates_view(source, market_permission="暂停标准新增")
+
+        self.assertEqual(result.iloc[0]["建议买入区间"], "暂不建议买入（市场权限：暂停标准新增）")
+
+    def test_buy_range_column_follows_name(self):
+        source = pd.DataFrame(
+            [
+                {
+                    "买点灯号": "绿",
+                    "Code": "159516",
+                    "Name": "半导体设备ETF",
+                    "建议买入区间": "标准复核区间 1.498–1.515",
+                    "建议": "复核",
+                    "否决原因": "",
+                    "通过项": 5,
+                    "质量评分": 9.0,
+                    "剩余额度": 0.02,
+                    "Latest": 1.52,
+                    "PctChg": 0.6,
+                }
+            ]
+        )
+
+        result = main.build_buy_candidates_view(source, market_permission="开放买点复核")
+
+        self.assertEqual(result.columns[result.columns.get_loc("Name") + 1], "建议买入区间")
+
     def test_buy_candidates_keep_all_rows_and_sort_by_signal(self):
         buy_filter = pd.DataFrame(
             [

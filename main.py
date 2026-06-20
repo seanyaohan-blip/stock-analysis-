@@ -122,7 +122,7 @@ GROWTH_ANCHORS = [
 ]
 
 BUY_FILTER_COLUMNS = [
-    "买点灯号", "Code", "Name", "Role", "质量评分", "质量状态", "情绪温度", "反馈状态",
+    "买点灯号", "Code", "Name", "建议买入区间", "Role", "质量评分", "质量状态", "情绪温度", "反馈状态",
     "当前仓位", "目标仓位", "剩余额度", "仓位状态",
     "Latest", "PctChg", "日内位置", "量能倍数", "分时结构", "量价关系", "份额变动", "折溢价",
     "龙头同步", "次日验证", "通过项", "通过明细", "未通过项", "待确认项", "一票否决", "否决原因", "建议",
@@ -2135,6 +2135,12 @@ def build_buy_candidates_view(
     if "PctChg" in result.columns:
         pct_chg = pd.to_numeric(result["PctChg"], errors="coerce")
         result.loc[pct_chg.isna(), "数据状态"] = "行情未刷新"
+    if market_permission != "开放买点复核" and "建议买入区间" in result.columns:
+        numeric_range = result["建议买入区间"].astype(str).str.contains(
+            r"\d+(?:\.\d+)?–\d+(?:\.\d+)?",
+            regex=True,
+        )
+        result.loc[numeric_range, "建议买入区间"] = f"暂不建议买入（市场权限：{market_permission}）"
 
     signal_rank = {"绿": 0, "黄": 1, "红": 2, "灰": 3}
     result["_signal_rank"] = result["买点灯号"].map(signal_rank).fillna(4)
@@ -2148,7 +2154,7 @@ def build_buy_candidates_view(
     ).drop(columns=["_signal_rank", "_quality_rank", "_pass_rank", "_room_rank"])
 
     priority_columns = [
-        "买点灯号", "Code", "Name", "建议", "阻断原因", "通过项",
+        "买点灯号", "Code", "Name", "建议买入区间", "建议", "阻断原因", "通过项",
         "质量状态", "市场权限", "当前仓位", "目标仓位", "剩余额度",
         "年度配置项", "年度资金缺口", "年度完成率", "数据状态",
     ]
@@ -2861,6 +2867,68 @@ def normalize_manual_signal(value) -> str:
     return "待确认"
 
 
+def format_buy_range_recommendation(
+    code: str,
+    name: str,
+    technical_signal: str,
+    latest,
+    high,
+    low,
+    prev_close,
+    prev_day_low,
+    quote_time,
+    data_source: str,
+    hard_block_kind: str,
+    hard_block_reason: str,
+    veto_reason: str,
+    now: datetime | None = None,
+) -> str:
+    """把可复算价格区间转换为带权限语义的候选表文本。"""
+    current = now or datetime.now()
+    live_sources = {"行情接口", "东方财富补齐", "腾讯行情补齐"}
+    source = str(data_source or "").strip()
+    if source not in live_sources or not is_recent_complete_quote(quote_time, current):
+        return "暂不建议买入（行情未刷新或数据不完整）"
+
+    if str(veto_reason or "").strip() not in {"", "无"}:
+        return f"暂不建议买入（{veto_reason}）"
+    if hard_block_kind and hard_block_kind != "position_full":
+        return f"暂不建议买入（{hard_block_reason or '存在硬性阻断'}）"
+
+    range_signal = technical_signal
+    if hard_block_kind == "position_full" and range_signal not in {"绿", "黄"}:
+        range_signal = "黄"
+    price_range = calculate_buy_range(
+        code=code,
+        name=name,
+        signal=range_signal,
+        latest=latest,
+        high=high,
+        low=low,
+        prev_close=prev_close,
+        prev_day_low=prev_day_low,
+    )
+    if price_range is None:
+        return "暂不建议买入（等待重新站稳昨日低点）"
+
+    tick = price_tick(code, name)
+    decimals = 3 if tick == 0.001 else 2
+    lower, upper = price_range
+    range_text = f"{lower:.{decimals}f}–{upper:.{decimals}f}"
+    quote_dt = pd.to_datetime(quote_time).to_pydatetime()
+    is_next_session_reference = quote_dt.date() < current.date()
+    if hard_block_kind == "position_full":
+        label = "下一交易日观察区间" if is_next_session_reference else "观察区间"
+        return f"暂不建议买入；{label} {range_text}"
+    if technical_signal == "绿":
+        label = "下一交易日标准复核区间" if is_next_session_reference else "标准复核区间"
+        return f"{label} {range_text}"
+    if technical_signal == "黄":
+        label = "下一交易日半额复核区间" if is_next_session_reference else "半额复核区间"
+        return f"{label} {range_text}"
+    return "暂不建议买入（买点过滤器未通过）"
+
+
 def build_buy_filter(
     watchlist: pd.DataFrame,
     market_data: pd.DataFrame,
@@ -2954,6 +3022,9 @@ def build_buy_filter(
         high = quote["High"] if quote is not None else None
         low = quote["Low"] if quote is not None else None
         prev_close = quote["PrevClose"] if quote is not None else None
+        prev_day_low = quote["PrevDayLow"] if quote is not None else None
+        quote_time = quote["QuoteTime"] if quote is not None else None
+        data_source = quote["DataSource"] if quote is not None else ""
         amount = quote["Amount"] if quote is not None else None
         avg20_amount = quote["Avg20Amount"] if quote is not None else None
         avg20_source = quote["Avg20AmountSource"] if quote is not None and "Avg20AmountSource" in quote.index else ""
@@ -3054,6 +3125,44 @@ def build_buy_filter(
             pending_items.append("次日验证")
 
         pass_count = len(pass_items)
+        if veto == "是":
+            technical_signal = "红"
+        elif pass_count >= BUY_STANDARD_MIN:
+            technical_signal = "绿"
+        elif pass_count >= BUY_HALF_MIN:
+            technical_signal = "黄"
+        else:
+            technical_signal = "灰"
+        if avg20_is_proxy and technical_signal == "绿":
+            technical_signal = "黄"
+
+        range_block_kind = hard_block_kind
+        range_block_reason = hard_block_reason
+        if hard_block_kind == "position_full":
+            if "数据不足" in quality_status:
+                range_block_kind = "quality_missing"
+                range_block_reason = "缺少完整质量评分或证据，禁止新增"
+            elif "低于6分" in quality_status:
+                range_block_kind = "quality"
+                range_block_reason = "质量评分低于6分，禁止新增"
+            elif emotion_temperature >= 4:
+                range_block_kind = "emotion"
+                range_block_reason = f"情绪温度{emotion_temperature}级，按V2.8.5暂停新增"
+        buy_range_recommendation = format_buy_range_recommendation(
+            code=code,
+            name=name,
+            technical_signal=technical_signal,
+            latest=latest,
+            high=high,
+            low=low,
+            prev_close=prev_close,
+            prev_day_low=prev_day_low,
+            quote_time=quote_time,
+            data_source=data_source,
+            hard_block_kind=range_block_kind,
+            hard_block_reason=range_block_reason,
+            veto_reason=veto_reason,
+        )
         if hard_block_kind:
             veto = "是"
             veto_reason = hard_block_reason if veto_reason == "无" else f"{hard_block_reason}；{veto_reason}"
@@ -3101,6 +3210,7 @@ def build_buy_filter(
                 "买点灯号": decision_level,
                 "Code": code,
                 "Name": name,
+                "建议买入区间": buy_range_recommendation,
                 "Role": role,
                 "质量评分": quality_value,
                 "质量状态": quality_status,
