@@ -2383,7 +2383,7 @@ def style_excel_worksheet(ws, sheet_name: str) -> None:
     default_widths = {
         "Code": 12,
         "Name": 18,
-        "建议买入区间": 32,
+        "建议买入区间": 38,
         "Role": 14,
         "质量评分": 11,
         "质量状态": 22,
