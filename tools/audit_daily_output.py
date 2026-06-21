@@ -29,6 +29,8 @@ TARGET_SHEETS = [
     "Positions",
     "Broker_Snapshot",
     "Watchlist",
+    "Investment_Profile",
+    "Data_Sources",
     "Framework_Rules",
     "Checks",
     "使用说明",
@@ -125,6 +127,12 @@ def main(path: Path) -> int:
         ],
         "04_持仓风险": [
             "风险级别", "Code", "Name", "动作建议", "触发原因", "Weight", "Target Weight",
+        ],
+        "Investment_Profile": [
+            "Section", "Key", "Value", "Notes", "当前生效值", "维护文件",
+        ],
+        "Data_Sources": [
+            "Module", "DataType", "PrimarySource", "FallbackSource", "FreshnessRule", "FailureBehavior", "ConfigFile",
         ],
     }
 

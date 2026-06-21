@@ -47,6 +47,10 @@ output/V2.8.5_A股盘前决策简报_20260619_083000.docx
 
 质量评分、ETF份额/IOPV、龙头同步或次日验证缺失时，报告只输出条件式复核，不会把代理数据写成可执行结论。
 
+父目录中的 `investment_profile.csv` 记录投资偏好、纪律开关和建议刷新时间；`data_sources.csv`
+记录每日行情、持仓、年度配置和盘前情报的数据来源与失败处理。每日行情输出会把这两张配置写入
+`Investment_Profile` 和 `Data_Sources` 页，盘前报告以最新每日输出为准。
+
 ## 新闻源维护
 
 新闻源在 `news_sources.csv` 中维护。

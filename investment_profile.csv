@@ -1,0 +1,21 @@
+Section,Key,Value,Notes
+身份偏好,framework_version,V2.8.5,当前仪表盘与盘前报告使用的纪律版本
+身份偏好,output_language,中文,所有输出和提示优先使用中文
+身份偏好,user_timezone,Asia/Shanghai,交易日判断和定时建议按中国时区
+决策风格,dashboard_style,行动优先,首页优先呈现市场权限 今日动作 买入候选 持仓风险
+决策风格,buy_candidates_view,全部关注标的按绿黄红灰排序,买入候选必须保留所有关注标的并直接标明阻断原因
+决策风格,buy_price_range,买入区间,结合完整近期行情和V2.8.4/V2.8.5买点纪律输出复核区间
+交易纪律,allow_auto_trade,否,不连接券商 不自动下单 不代替人工确认
+交易纪律,position_full_buy_rule,暂不建议买入但保留观察区间,仓位已达或超过目标时禁止加仓 仍给出观察区间用于复盘
+交易纪律,stale_quote_rule,行情未刷新时不输出数字买入区间,避免用旧行情给出可执行价格
+交易纪律,legacy_position_rule,遗留仓禁止新增,遗留仓只允许反弹减仓或退出复审
+交易纪律,innovative_medicine_rule,只做价格提醒,创新药主题不得输出自动成交建议
+交易纪律,daily_buy_limit,单日最多一个买入方向,买点过滤通过也不等于必须买入
+交易纪律,daily_sell_review_limit,单日最多两个卖出或减仓复核方向,优先处理红色风险项
+资金安全,cash_buffer_min,300000,来自decision_inputs.csv 当前最低流动性安全垫
+资金安全,cash_buffer_target,500000,来自decision_inputs.csv 当前目标流动性安全垫
+组合约束,theme_limits,半导体18% AI算力15% 机器人18% 新能源25% 创新药15% 科技成长合计45%,使用全资产穿透口径判断产业链簇上限
+数据质量,quality_score_rule,缺少完整质量评分不得自动放行,代理分只能提示 不得折算成完整评分
+数据质量,emotion_rule,人工情绪温度优先 空白时仅使用低可靠性观察池代理,情绪温度大于等于4时暂停标准新增
+运行偏好,daily_output_active_times,交易日09:45/11:00/14:00/15:30,与当前已启用的每日行情输出自动化保持一致
+运行偏好,premarket_report_active_time,交易日09:00,与当前已启用的盘前情报报告自动化保持一致

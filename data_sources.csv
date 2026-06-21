@@ -1,0 +1,10 @@
+Module,DataType,PrimarySource,FallbackSource,FreshnessRule,FailureBehavior,ConfigFile
+每日行情,指数 ETF A股准实时行情,AKShare,东方财富实时接口 腾讯行情接口,QuoteTime为最近0到3个自然日且最新价 开高低 昨收 昨日低点完整,标记行情未刷新并禁止新增或数字买入区间,main.py
+每日行情,20日成交额与昨日低点,东方财富日K统计,腾讯日K统计 当日低点临时替代,日K字段必须能支持量能倍数和昨日低点复核,写入数据边界和修复提示,main.py
+持仓数据,券商持仓与账户汇总,positions.csv,券商截图人工录入,每次截图后人工更新总资产 可用资金 总仓位 单标的持仓,持仓缺失时禁止自动给出买入建议,positions.csv
+观察池,关注标的 角色 主题 目标仓位 质量证据,watchlist.csv,人工维护,新增标的必须补齐角色 主题 资产类型和质量证据,缺少质量证据时只能观察不得新增,watchlist.csv
+人工输入,情绪温度 现金安全垫 其他人工覆盖,decision_inputs.csv,空白则使用低可靠性代理,人工值必须带来源和日期更利于复核,空白不阻断运行但会降低可靠性,decision_inputs.csv
+第一年度配置,全资产目标 配置进度 收益观察区间,first_year_allocation.csv,1st年配置表.xlsx 与优化版配置表,金额目标按当前全资产动态重算,年度缺口只表示规划空间 不构成买入信号,first_year_allocation.csv
+盘前情报,隔夜海外市场行情,Yahoo Finance免费行情接口,同组备用symbol,隔夜数据缺失或陈旧时必须在报告中标注,不把旧数据伪装成最新情报,premarket_report/main.py
+盘前情报,新闻源与政策源,premarket_report/news_sources.csv,Google News站内RSS与网页备用入口,新闻源失败需写入报告末尾的数据审计提示,继续生成报告但降级为条件式复核,premarket_report/news_sources.csv
+输出审计,每日输出完整性与买入区间安全性,tools/audit_daily_output.py,人工打开检查,必须包含前台六页 规则 数据质量 组合穿透 校验页,发现空白关键列或旧行情数字区间则提示问题,tools/audit_daily_output.py

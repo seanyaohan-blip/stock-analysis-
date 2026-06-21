@@ -183,17 +183,36 @@ class ActionFirstDashboardTests(unittest.TestCase):
     def test_front_sheet_order_is_fixed(self):
         sheets = {
             "Checks": pd.DataFrame(),
+            "Investment_Profile": pd.DataFrame(),
+            "Data_Sources": pd.DataFrame(),
             "03_买入候选": pd.DataFrame(),
             "01_今日决策": pd.DataFrame(),
             "06_组合总览": pd.DataFrame(),
             "04_持仓风险": pd.DataFrame(),
             "02_今日动作": pd.DataFrame(),
             "05_年度配置": pd.DataFrame(),
+            "Framework_Rules": pd.DataFrame(),
         }
 
         names = main.build_output_sheet_order(sheets)
 
         self.assertEqual(names[:6], main.FRONT_SHEET_ORDER)
+        self.assertLess(names.index("Investment_Profile"), names.index("Framework_Rules"))
+        self.assertLess(names.index("Data_Sources"), names.index("Framework_Rules"))
+
+    def test_profile_and_data_source_tables_are_loaded(self):
+        profile = main.build_investment_profile(
+            {
+                "cash_buffer_min": {"Value": "300000"},
+                "cash_buffer_target": {"Value": "500000"},
+            }
+        )
+        sources = main.build_data_sources()
+
+        self.assertIn("buy_candidates_view", set(profile["Key"]))
+        self.assertIn("当前生效值", profile.columns)
+        self.assertIn("每日行情", set(sources["Module"]))
+        self.assertIn("FailureBehavior", sources.columns)
 
     def test_action_plan_adds_position_limits(self):
         execution_plan = pd.DataFrame(

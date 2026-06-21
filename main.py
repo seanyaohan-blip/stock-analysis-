@@ -46,6 +46,8 @@ WATCHLIST_CSV = BASE_DIR / "watchlist.csv"
 POSITIONS_CSV = BASE_DIR / "positions.csv"
 DECISION_INPUTS_CSV = BASE_DIR / "decision_inputs.csv"
 FIRST_YEAR_ALLOCATION_CSV = BASE_DIR / "first_year_allocation.csv"
+INVESTMENT_PROFILE_CSV = BASE_DIR / "investment_profile.csv"
+DATA_SOURCES_CSV = BASE_DIR / "data_sources.csv"
 OUTPUT_DIR = BASE_DIR / "output"
 FRAMEWORK_VERSION = "V2.8.5"
 PRODUCT_NAME = "ETF / A股统一投资决策仪表盘"
@@ -68,6 +70,8 @@ DETAIL_SHEET_ORDER = [
     "Positions",
     "Broker_Snapshot",
     "Watchlist",
+    "Investment_Profile",
+    "Data_Sources",
     "Framework_Rules",
     "Checks",
     "使用说明",
@@ -303,6 +307,45 @@ def load_decision_inputs() -> dict[str, dict[str, str]]:
         if key:
             rows[key] = {column: str(row.get(column, "")).strip() for column in frame.columns}
     return rows
+
+
+def load_optional_csv(path: Path, expected_columns: list[str]) -> pd.DataFrame:
+    """读取可选配置表；缺失时返回带表头的空表，避免主流程中断。"""
+    if not path.exists():
+        return pd.DataFrame(columns=expected_columns)
+    frame = pd.read_csv(path, dtype=str, encoding="utf-8-sig").fillna("")
+    for column in expected_columns:
+        if column not in frame.columns:
+            frame[column] = ""
+    return frame[expected_columns]
+
+
+def build_investment_profile(decision_inputs: dict[str, dict[str, str]]) -> pd.DataFrame:
+    """汇总投资偏好与纪律设置，写入每日输出方便复核。"""
+    profile = load_optional_csv(INVESTMENT_PROFILE_CSV, ["Section", "Key", "Value", "Notes"])
+    if profile.empty:
+        return profile
+    profile = profile.copy()
+    overrides = {
+        "cash_buffer_min": decision_input_number(decision_inputs, "cash_buffer_min"),
+        "cash_buffer_target": decision_input_number(decision_inputs, "cash_buffer_target"),
+        "emotion_temperature": decision_input_number(decision_inputs, "emotion_temperature"),
+    }
+    profile["当前生效值"] = [
+        overrides.get(str(row.get("Key", "")).strip()) if overrides.get(str(row.get("Key", "")).strip()) is not None else row.get("Value", "")
+        for _, row in profile.iterrows()
+    ]
+    profile["维护文件"] = "investment_profile.csv"
+    profile.loc[profile["Key"].isin(["cash_buffer_min", "cash_buffer_target", "emotion_temperature"]), "维护文件"] = "decision_inputs.csv"
+    return profile
+
+
+def build_data_sources() -> pd.DataFrame:
+    """汇总行情、持仓、配置和盘前报告的数据来源。"""
+    return load_optional_csv(
+        DATA_SOURCES_CSV,
+        ["Module", "DataType", "PrimarySource", "FallbackSource", "FreshnessRule", "FailureBehavior", "ConfigFile"],
+    )
 
 
 def decision_input_number(inputs: dict[str, dict[str, str]], key: str) -> float | None:
@@ -2443,6 +2486,19 @@ def style_excel_worksheet(ws, sheet_name: str) -> None:
         "年度配置状态": 18,
         "进度状态": 18,
         "执行约束": 46,
+        "Section": 14,
+        "Key": 28,
+        "Value": 42,
+        "Notes": 56,
+        "当前生效值": 42,
+        "维护文件": 24,
+        "Module": 14,
+        "DataType": 26,
+        "PrimarySource": 28,
+        "FallbackSource": 38,
+        "FreshnessRule": 56,
+        "FailureBehavior": 56,
+        "ConfigFile": 26,
     }
 
     for col_idx in range(1, ws.max_column + 1):
@@ -2487,6 +2543,10 @@ def style_excel_worksheet(ws, sheet_name: str) -> None:
                     cell.font = Font(bold=True)
                 elif str(cell.value) == "否":
                     cell.fill = neutral_fill
+
+    if sheet_name in ("Investment_Profile", "Data_Sources"):
+        for row in range(2, ws.max_row + 1):
+            ws.row_dimensions[row].height = 44
 
     if sheet_name in ("Buy_Filter", "Positions_Action", "03_买入候选", "04_持仓风险"):
         for row in range(2, ws.max_row + 1):
@@ -3286,6 +3346,8 @@ def main() -> int:
     exposure = attach_first_year_fields(exposure, first_year)
     watchlist_output = attach_first_year_fields(watchlist, first_year)
     rules = build_framework_rules(decision_inputs, first_year)
+    investment_profile = build_investment_profile(decision_inputs)
+    data_sources = build_data_sources()
     checks = build_checks(watchlist, positions, positions_sheet, account_meta, market_data, quality_score, first_year)
     execution_plan = build_execution_plan(buy_filter, positions_action, positions_sheet, first_year)
     decision_center = build_decision_center(double_anchor, emotion, quality_score, buy_filter, positions_action, first_year_summary)
@@ -3321,6 +3383,8 @@ def main() -> int:
         "Positions": positions_sheet,
         "Broker_Snapshot": broker_snapshot,
         "Watchlist": watchlist_output,
+        "Investment_Profile": investment_profile,
+        "Data_Sources": data_sources,
         "Framework_Rules": rules,
         "Checks": checks,
         "使用说明": pd.DataFrame(
@@ -3329,11 +3393,13 @@ def main() -> int:
                 {"步骤": "2", "操作": "补充质量与六项信号", "说明": "在watchlist.csv填写完整质量分、评分证据、份额/筹码、折溢价/估值、龙头同步和次日验证"},
                 {"步骤": "3", "操作": "编辑 decision_inputs.csv", "说明": "可选：填写1-5级人工情绪温度；空白时只显示低可靠性代理"},
                 {"步骤": "4", "操作": "编辑 first_year_allocation.csv", "说明": "维护第一年全资产目标、代码映射、收益观察区间与执行约束；年度缺口不是买入信号"},
-                {"步骤": "5", "操作": "编辑 positions.csv", "说明": "维护持仓数量、成本、账户总资产和券商截图持仓快照"},
-                {"步骤": "6", "操作": "运行 python main.py", "说明": "抓取行情并生成 Excel"},
-                {"步骤": "7", "操作": f"打开 output 文件夹里最新的 {FRAMEWORK_VERSION}_每日行情输出_日期时间.xlsx", "说明": "按顺序查看 01_今日决策、02_今日动作、03_买入候选、04_持仓风险、05_年度配置和06_组合总览"},
-                {"步骤": "8", "操作": "理解双口径", "说明": "第一年目标使用全资产口径；证券账户目标继续作为集中度硬约束"},
-                {"步骤": "9", "操作": "理解数据边界", "说明": "缺失项不得自动判绿；代理分不折算为完整评分"},
+                {"步骤": "5", "操作": "编辑 investment_profile.csv", "说明": "维护投资偏好、纪律开关、建议刷新时间和展示偏好"},
+                {"步骤": "6", "操作": "查看 Data_Sources", "说明": "确认行情、持仓、年度配置和盘前情报的数据来源与失败处理"},
+                {"步骤": "7", "操作": "编辑 positions.csv", "说明": "维护持仓数量、成本、账户总资产和券商截图持仓快照"},
+                {"步骤": "8", "操作": "运行 python main.py", "说明": "抓取行情并生成 Excel"},
+                {"步骤": "9", "操作": f"打开 output 文件夹里最新的 {FRAMEWORK_VERSION}_每日行情输出_日期时间.xlsx", "说明": "按顺序查看 01_今日决策、02_今日动作、03_买入候选、04_持仓风险、05_年度配置和06_组合总览"},
+                {"步骤": "10", "操作": "理解双口径", "说明": "第一年目标使用全资产口径；证券账户目标继续作为集中度硬约束"},
+                {"步骤": "11", "操作": "理解数据边界", "说明": "缺失项不得自动判绿；代理分不折算为完整评分"},
             ]
         ),
     }
