@@ -28,18 +28,20 @@ def replace_sheet(wb, name: str, frame: pd.DataFrame, index: int) -> None:
 def run(source: Path) -> Path:
     sheets = pd.read_excel(
         source,
-        sheet_name=["03_买入候选", "04_持仓风险", "Positions", "05_年度配置"],
+        sheet_name=["03_买入候选", "05_持仓风险", "Positions", "06_年度配置"],
         dtype={"Code": str},
     )
     execution = main.build_execution_plan(
         sheets["03_买入候选"],
-        sheets["04_持仓风险"],
+        sheets["05_持仓风险"],
         sheets["Positions"],
-        sheets["05_年度配置"],
+        sheets["06_年度配置"],
     )
     execution = main.build_action_plan_view(execution, sheets["03_买入候选"], sheets["Positions"])
+    stage = main.build_stage_progression_view(sheets["03_买入候选"], "开放买点复核")
     wb = load_workbook(source)
     replace_sheet(wb, "02_今日动作", execution, 1)
+    replace_sheet(wb, "04_阶段推进", stage, 3)
     output = source.with_name(f"{main.FRAMEWORK_VERSION}_每日行情输出_{datetime.now():%Y%m%d_%H%M%S}.xlsx")
     wb.save(output)
     return output

@@ -18,6 +18,7 @@ V2.8.5 ETF / A股统一投资决策仪表盘
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import time
 import urllib.request
@@ -48,17 +49,33 @@ DECISION_INPUTS_CSV = BASE_DIR / "decision_inputs.csv"
 FIRST_YEAR_ALLOCATION_CSV = BASE_DIR / "first_year_allocation.csv"
 INVESTMENT_PROFILE_CSV = BASE_DIR / "investment_profile.csv"
 DATA_SOURCES_CSV = BASE_DIR / "data_sources.csv"
+BUY_POINT_PLAN_CSV = BASE_DIR / "buy_point_plan.csv"
 OUTPUT_DIR = BASE_DIR / "output"
 FRAMEWORK_VERSION = "V2.8.5"
+FRAMEWORK_DISPLAY_VERSION = "V2.8.5-QM"
 PRODUCT_NAME = "ETF / A股统一投资决策仪表盘"
+LIVE_QUOTE_SOURCES = {"行情接口", "东方财富补齐", "腾讯行情补齐"}
+MISSING_TEXT_VALUES = {"", "-", "--", "—", "nan", "none", "null", "n/a", "na"}
+POSITIVE_MARKET_FIELDS = {"Latest", "Open", "High", "Low", "PrevClose", "Avg20Amount", "PrevDayLow"}
+NUMERIC_MARKET_FIELDS = {"PctChg", "Amount"}
+BUY_RANGE_PRICE_FIELDS = {
+    "latest": "最新价",
+    "high": "最高",
+    "low": "最低",
+    "prev_close": "昨收",
+    "prev_day_low": "昨日低点",
+}
+TRUSTED_PREV_DAY_LOW_SOURCES = {"东方财富日K统计", "腾讯日K补齐"}
 
 FRONT_SHEET_ORDER = [
     "01_今日决策",
     "02_今日动作",
     "03_买入候选",
-    "04_持仓风险",
-    "05_年度配置",
-    "06_组合总览",
+    "04_阶段推进",
+    "买点计划",
+    "05_持仓风险",
+    "06_年度配置",
+    "07_组合总览",
 ]
 
 DETAIL_SHEET_ORDER = [
@@ -67,11 +84,14 @@ DETAIL_SHEET_ORDER = [
     "Quality_Score",
     "Exposure",
     "Market_Data",
+    "Buy_Filter",
     "Positions",
     "Broker_Snapshot",
     "Watchlist",
+    "长期跟踪个股",
     "Investment_Profile",
     "Data_Sources",
+    "Buy_Point_Plan_Source",
     "Framework_Rules",
     "Checks",
     "使用说明",
@@ -89,7 +109,22 @@ THEME_LIMITS = {
     "机器人/自动化": 0.18,
     "新能源/绿电": 0.25,
     "创新药/生物医药": 0.15,
-    "科技成长合计": 0.45,
+    "科技成长合计": 0.50,
+}
+
+MAINLINE_CYCLE_STAGES = "触底期→突破期→主线聚焦期→加速期→背驰上涨期→退潮期"
+TREND_BUY_PRIORITY = "回踩买点 > 突破买点 > 止跌买点"
+RETREAT_THREE_FACTORS = "主线证伪 × 资金退潮 × 估值透支"
+VOLUME_ABSORPTION_SEQUENCE = "爆量突破→缩量回踩→不破关键支撑→再次放量转强"
+V285_SUPPLEMENT_SOURCE = "V2.8.5 第十九部分：爆量与量质吸买点确认规则"
+MENTAL_MODEL_SOURCE = "V2.8.5-QM：多元思维模型认知防错层"
+QUANT_MODULE_SOURCE = "V2.8.5-Q：量化验证与执行纪律模块"
+DIVIDEND_STOCK_SOURCE = "上传文本：长期稳定分红个股配置与高息陷阱规则"
+
+DIVIDEND_CORE_STOCK_CODES = {"600900", "600941", "601398", "601939", "601088", "000333"}
+DIVIDEND_ENHANCED_STOCK_CODES = {
+    "601288", "601988", "600377", "600642", "600023",
+    "601225", "600028", "000651", "600690",
 }
 
 
@@ -127,8 +162,17 @@ GROWTH_ANCHORS = [
 
 BUY_FILTER_COLUMNS = [
     "买点灯号", "Code", "Name", "建议买入区间", "Role", "质量评分", "质量状态", "情绪温度", "反馈状态",
+    "趋势结构", "关键支撑纪律", "单次仓位上限", "爆量/量质吸纪律",
+    "机会成本检查", "认知防错", "决策树情景", "赔率/最大损失", "反向失败路径", "能力圈边界",
+    "资产角色", "量化验证分", "量化验证状态", "量化买点规则", "正期望检查", "量化风控规则",
+    "红利配置角色", "分红质量检查", "红利买点规则", "高息陷阱否决",
     "当前仓位", "目标仓位", "剩余额度", "仓位状态",
-    "Latest", "PctChg", "日内位置", "量能倍数", "分时结构", "量价关系", "份额变动", "折溢价",
+    "阶段状态", "阶段目标下限", "阶段目标上限", "阶段占用率", "阶段验证", "阶段推进结论", "下一档单次上限", "阶段阻断原因", "阶段动作说明",
+    "仓位决策口径", "全资产当前仓位", "全资产目标仓位", "全资产剩余额度", "全资产仓位状态",
+    "证券账户仓位", "证券账户目标仓位", "证券账户仓位状态",
+    "Latest", "PctChg", "Open", "High", "Low", "PrevClose", "PrevDayLow", "PrevDayLowSource",
+    "QuoteTime", "DataSource", "接口状态", "失败原因", "重试结果", "评分输入状态", "评分缺失项",
+    "日内位置", "量能倍数", "分时结构", "量价关系", "份额变动", "折溢价",
     "龙头同步", "次日验证", "通过项", "通过明细", "未通过项", "待确认项", "一票否决", "否决原因", "建议",
 ]
 
@@ -184,6 +228,27 @@ def round_to_tick(value: float, tick: float) -> float:
     return float(rounded_units * decimal_tick)
 
 
+def price_decimals(code: str, name: str) -> int:
+    """根据最小报价单位决定表格展示精度。"""
+    return 3 if price_tick(code, name) == 0.001 else 2
+
+
+def format_price_value(value, code: str, name: str) -> str:
+    """把价格格式化为与 ETF/A股报价单位一致的文本。"""
+    numeric = to_float(value)
+    if numeric is None:
+        return ""
+    decimals = price_decimals(code, name)
+    return f"{numeric:.{decimals}f}"
+
+
+def format_price_range(price_range: tuple[float, float], code: str, name: str) -> str:
+    """格式化买点/观察区间。"""
+    decimals = price_decimals(code, name)
+    lower, upper = price_range
+    return f"{lower:.{decimals}f}–{upper:.{decimals}f}"
+
+
 def calculate_buy_range(
     code: str,
     name: str,
@@ -218,13 +283,70 @@ def calculate_buy_range(
     return lower_rounded, upper_rounded
 
 
+def calculate_reclaim_prev_low_range(
+    code: str,
+    name: str,
+    prev_day_low,
+) -> tuple[float, float] | None:
+    """跌破昨日低点后，给出重新站稳后的窄观察区间。"""
+    prev_low_f = to_float(prev_day_low)
+    if prev_low_f is None or prev_low_f <= 0:
+        return None
+    tick = price_tick(code, name)
+    lower = round_to_tick(prev_low_f, tick)
+    upper = round_to_tick(max(prev_low_f * 1.005, prev_low_f + tick), tick)
+    if upper <= lower:
+        upper = round_to_tick(lower + tick, tick)
+    return lower, upper
+
+
+def calculate_reference_buy_range(
+    code: str,
+    name: str,
+    latest,
+    high,
+    low,
+    prev_close,
+    prev_day_low,
+) -> tuple[float, float] | None:
+    """在暂不建议买入时，给出不可执行的观察区间，避免只输出纯文字。"""
+    latest_f = to_float(latest)
+    prev_low_f = to_float(prev_day_low)
+    if latest_f is not None and prev_low_f is not None and latest_f < prev_low_f:
+        return calculate_reclaim_prev_low_range(code, name, prev_day_low)
+
+    price_range = calculate_buy_range(
+        code=code,
+        name=name,
+        signal="黄",
+        latest=latest,
+        high=high,
+        low=low,
+        prev_close=prev_close,
+        prev_day_low=prev_day_low,
+    )
+    if price_range is not None:
+        return price_range
+
+    if latest_f is None or latest_f <= 0:
+        return None
+    tick = price_tick(code, name)
+    lower = round_to_tick(max(latest_f * 0.985, tick), tick)
+    upper = round_to_tick(max(latest_f * 0.995, lower + tick), tick)
+    if upper < lower:
+        upper = round_to_tick(lower + tick, tick)
+    return lower, upper
+
+
 def first_valid(*values):
     """返回第一个非空值，用于行情缺失时使用券商截图数据补充。"""
     for value in values:
         if value is None:
             continue
-        if isinstance(value, str) and value.strip() == "":
-            continue
+        if isinstance(value, str):
+            text = value.strip()
+            if text.lower() in MISSING_TEXT_VALUES:
+                continue
         try:
             if pd.isna(value):
                 continue
@@ -232,6 +354,24 @@ def first_valid(*values):
             pass
         return value
     return None
+
+
+def has_market_field_value(column: str, value) -> bool:
+    """Return whether a market-data field is usable for freshness diagnostics."""
+    if first_valid(value) is None:
+        return False
+    if column in POSITIVE_MARKET_FIELDS:
+        numeric = to_float(value)
+        return numeric is not None and numeric > 0
+    if column in NUMERIC_MARKET_FIELDS:
+        return to_float(value) is not None
+    return True
+
+
+def missing_latest_mask(series: pd.Series) -> pd.Series:
+    """Latest must be a positive numeric price; '-' and zero are incomplete quotes."""
+    numeric = pd.to_numeric(series, errors="coerce")
+    return numeric.isna() | (numeric <= 0)
 
 
 def append_note(existing, note: str) -> str:
@@ -243,6 +383,20 @@ def append_note(existing, note: str) -> str:
     return f"{text}；{note}"
 
 
+def describe_weight_status(current_weight: float | None, target_weight: float | None, label: str = "目标") -> str:
+    """统一描述仓位是否低于/达到/超过目标，避免不同表格口径不一致。"""
+    if target_weight is None:
+        return f"未设置{label}仓位"
+    if current_weight is None:
+        return "当前仓位缺失，需人工确认"
+    gap = target_weight - current_weight
+    if gap < 0:
+        return f"超{label} {abs(gap):.2%}"
+    if gap == 0:
+        return f"已达{label}仓位"
+    return f"低于{label}，剩余 {gap:.2%}"
+
+
 def remove_note_phrases(existing, phrases: list[str]) -> str:
     text = str(existing or "").strip()
     if not text or text.lower() == "nan":
@@ -250,6 +404,183 @@ def remove_note_phrases(existing, phrases: list[str]) -> str:
     for phrase in phrases:
         text = text.replace(f"；{phrase}", "").replace(phrase, "")
     return text.strip("；")
+
+
+def missing_market_field_labels(row, fields: dict[str, str]) -> list[str]:
+    """Return human-readable labels for missing fields in a market-data row."""
+    missing: list[str] = []
+    for column, label in fields.items():
+        try:
+            value = row.get(column)
+        except AttributeError:
+            value = None
+        if not has_market_field_value(column, value):
+            missing.append(label)
+    return missing
+
+
+def missing_buy_range_price_labels(
+    latest,
+    high,
+    low,
+    prev_close,
+    prev_day_low,
+) -> list[str]:
+    """买入区间必须使用完整且为正的价格字段。"""
+    values = {
+        "latest": latest,
+        "high": high,
+        "low": low,
+        "prev_close": prev_close,
+        "prev_day_low": prev_day_low,
+    }
+    missing: list[str] = []
+    for key, value in values.items():
+        numeric = to_float(value)
+        if numeric is None or numeric <= 0:
+            missing.append(BUY_RANGE_PRICE_FIELDS[key])
+    return missing
+
+
+def buy_range_data_issue(
+    *,
+    latest,
+    high,
+    low,
+    prev_close,
+    prev_day_low,
+    quote_time,
+    data_source: str,
+    prev_day_low_source: str = "",
+    now: datetime | None = None,
+) -> str:
+    """Return the explicit data issue that blocks a numeric buy range."""
+    issues: list[str] = []
+    source = str(data_source or "").strip()
+    if source not in LIVE_QUOTE_SOURCES:
+        issues.append("行情来源")
+    if not is_recent_complete_quote(quote_time, now=now):
+        issues.append("行情时间")
+    issues.extend(missing_buy_range_price_labels(latest, high, low, prev_close, prev_day_low))
+
+    prev_source = str(prev_day_low_source or "").strip()
+    if prev_source and prev_source not in TRUSTED_PREV_DAY_LOW_SOURCES:
+        issues.append("昨日低点来源")
+
+    return "、".join(dict.fromkeys(issues))
+
+
+def clean_blocker_reason(value) -> str:
+    text = str(value or "").strip()
+    if text == "无" or text.lower() in MISSING_TEXT_VALUES:
+        return ""
+    return text
+
+
+def quote_data_blocker_reason(row, range_issue: str = "") -> str:
+    issue = str(range_issue or "").strip()
+    if issue:
+        return f"行情未刷新或数据不完整：{issue}"
+
+    status = clean_blocker_reason(row.get("接口状态", ""))
+    failure_reason = clean_blocker_reason(row.get("失败原因", ""))
+    if status and re.search(r"未刷新|缺失|失败", status):
+        return f"{status}：{failure_reason}" if failure_reason else status
+
+    latest_missing = to_float(row.get("Latest")) is None
+    pct_missing = to_float(row.get("PctChg")) is None
+    if latest_missing or pct_missing:
+        missing = []
+        if latest_missing:
+            missing.append("最新价")
+        if pct_missing:
+            missing.append("涨跌幅")
+        return f"行情未刷新或数据不完整：{'、'.join(missing)}"
+
+    return ""
+
+
+def build_market_interface_diagnostics(row, now: datetime | None = None) -> dict[str, str]:
+    """Summarize live quote freshness and retry outcome for one Market_Data row."""
+    source = str(row.get("DataSource", "") or "").strip()
+    quote_time = row.get("QuoteTime")
+    latest = first_valid(row.get("Latest"))
+    quote_missing = missing_market_field_labels(
+        row,
+        {
+            "Latest": "最新价",
+            "PctChg": "涨跌幅",
+            "Open": "今开",
+            "High": "最高",
+            "Low": "最低",
+            "PrevClose": "昨收",
+            "Amount": "成交额",
+            "QuoteTime": "行情时间",
+        },
+    )
+    stats_missing = missing_market_field_labels(
+        row,
+        {
+            "Avg20Amount": "20日均额",
+            "PrevDayLow": "昨日低点",
+        },
+    )
+    avg20_source = str(row.get("Avg20AmountSource", "") or "").strip()
+    prev_day_low_source = str(row.get("PrevDayLowSource", "") or "").strip()
+    if first_valid(row.get("Avg20Amount")) is not None and "替代" in avg20_source:
+        stats_missing.append("20日均额来源")
+    if first_valid(row.get("PrevDayLow")) is not None and prev_day_low_source and prev_day_low_source not in TRUSTED_PREV_DAY_LOW_SOURCES:
+        stats_missing.append("昨日低点来源")
+    recent_live_quote = source in LIVE_QUOTE_SOURCES and is_recent_complete_quote(quote_time, now=now)
+
+    if recent_live_quote and not quote_missing and not stats_missing:
+        status = "当日行情已刷新"
+        failure_reason = "无"
+    elif recent_live_quote and not quote_missing:
+        status = "行情字段缺失"
+        failure_reason = "实时行情已返回但买入区间或量能字段不完整"
+    elif source in LIVE_QUOTE_SOURCES:
+        status = "行情字段缺失"
+        failure_reason = "实时行情已返回但字段不完整"
+    elif source == "券商截图" and latest is not None:
+        status = "行情未刷新，券商截图兜底"
+        failure_reason = "实时行情接口未返回当日完整数据；仅用券商截图价格作持仓市值参考"
+    else:
+        status = "行情未刷新"
+        failure_reason = "AKShare实时行情未命中；东方财富/腾讯当日行情补齐未返回"
+
+    if quote_missing and failure_reason != "无":
+        failure_reason = append_note(failure_reason, "缺失字段：" + "、".join(quote_missing))
+    elif quote_missing:
+        failure_reason = "缺失字段：" + "、".join(quote_missing)
+
+    if stats_missing:
+        retry_result = "日K首轮失败后已重试，仍缺：" + "、".join(stats_missing)
+    elif recent_live_quote and not quote_missing:
+        retry_result = "实时行情与日K补齐可用"
+    else:
+        retry_result = "实时行情补齐已尝试，未取得当日完整行情"
+
+    return {
+        "接口状态": status,
+        "失败原因": failure_reason,
+        "重试结果": retry_result,
+    }
+
+
+def attach_market_interface_diagnostics(market_data: pd.DataFrame) -> pd.DataFrame:
+    """Add structured interface diagnostics used by dashboard and audit sheets."""
+    if market_data.empty:
+        return market_data
+    out = market_data.copy()
+    for column in ("接口状态", "失败原因", "重试结果"):
+        if column not in out.columns:
+            out[column] = ""
+    for idx, row in out.iterrows():
+        diagnostics = build_market_interface_diagnostics(row)
+        for column, value in diagnostics.items():
+            out.at[idx, column] = value
+    return out
 
 
 def print_actual_columns(source_name: str, df: pd.DataFrame) -> None:
@@ -330,13 +661,28 @@ def build_investment_profile(decision_inputs: dict[str, dict[str, str]]) -> pd.D
         "cash_buffer_min": decision_input_number(decision_inputs, "cash_buffer_min"),
         "cash_buffer_target": decision_input_number(decision_inputs, "cash_buffer_target"),
         "emotion_temperature": decision_input_number(decision_inputs, "emotion_temperature"),
+        "mainline_stage": decision_input_text(decision_inputs, "mainline_stage"),
+        "trend_buy_type": decision_input_text(decision_inputs, "trend_buy_type"),
+        "quant_module_status": decision_input_text(decision_inputs, "quant_module_status"),
+        "retreat_factor_status": decision_input_text(decision_inputs, "retreat_factor_status"),
     }
     profile["当前生效值"] = [
         overrides.get(str(row.get("Key", "")).strip()) if overrides.get(str(row.get("Key", "")).strip()) is not None else row.get("Value", "")
         for _, row in profile.iterrows()
     ]
     profile["维护文件"] = "investment_profile.csv"
-    profile.loc[profile["Key"].isin(["cash_buffer_min", "cash_buffer_target", "emotion_temperature"]), "维护文件"] = "decision_inputs.csv"
+    profile.loc[
+        profile["Key"].isin([
+            "cash_buffer_min",
+            "cash_buffer_target",
+            "emotion_temperature",
+            "mainline_stage",
+            "trend_buy_type",
+            "quant_module_status",
+            "retreat_factor_status",
+        ]),
+        "维护文件",
+    ] = "decision_inputs.csv"
     return profile
 
 
@@ -348,9 +694,29 @@ def build_data_sources() -> pd.DataFrame:
     )
 
 
+def load_buy_point_plan() -> pd.DataFrame:
+    """读取人工维护的未来买点计划，用于输出可执行前的价格区间和条件。"""
+    columns = [
+        "Code", "Name", "资产角色", "当前价参考",
+        "轻仓观察区间", "标准买点区间", "强买点区间", "不买/暂停区",
+        "下一笔合理金额", "成立条件", "风险暂停条件", "来源日期",
+    ]
+    frame = load_optional_csv(BUY_POINT_PLAN_CSV, columns)
+    if frame.empty:
+        return frame
+    frame = frame.copy()
+    frame["Code"] = frame["Code"].astype(str).str.strip().map(format_code)
+    return frame
+
+
 def decision_input_number(inputs: dict[str, dict[str, str]], key: str) -> float | None:
     item = inputs.get(key, {})
     return to_float(item.get("Value"))
+
+
+def decision_input_text(inputs: dict[str, dict[str, str]], key: str) -> str | None:
+    text = str(inputs.get(key, {}).get("Value", "") or "").strip()
+    return text or None
 
 
 def load_first_year_allocation() -> pd.DataFrame:
@@ -742,6 +1108,9 @@ def enrich_market_data_with_eastmoney(market_data: pd.DataFrame) -> pd.DataFrame
         return market_data
 
     out = market_data.copy()
+    for mixed_column in ("ETFShareChg", "Premium", "LeaderStatus"):
+        if mixed_column in out.columns:
+            out[mixed_column] = out[mixed_column].astype("object")
     codes = [format_code(code) for code in out["Code"].tolist()]
     quotes = fetch_eastmoney_quotes(codes)
     missing_codes = [code for code in codes if code not in quotes]
@@ -867,7 +1236,7 @@ def enrich_market_data_with_eastmoney(market_data: pd.DataFrame) -> pd.DataFrame
                 intraday_pos,
             )
 
-    return out
+    return attach_market_interface_diagnostics(out)
 
 
 def lookup_quote(code: str, spot_map: dict[str, pd.DataFrame]) -> dict:
@@ -969,6 +1338,9 @@ def build_market_data(
             "PrevDayLowSource": None,
             "QuoteTime": None,
             "DataSource": data_source,
+            "接口状态": "待补齐",
+            "失败原因": "待运行行情补齐接口",
+            "重试结果": "待运行日K补齐接口",
             "Notes": item.get("Notes", ""),
         }
 
@@ -983,7 +1355,7 @@ def build_market_data(
     columns = [
         "Code", "Name", "Role", "Latest", "PctChg", "Open", "High", "Low", "PrevClose",
         "Amount", "Avg20Amount", "Avg20AmountSource", "ETFShareChg", "Premium", "LeaderStatus", "PrevDayLow",
-        "PrevDayLowSource", "QuoteTime", "DataSource", "Notes",
+        "PrevDayLowSource", "QuoteTime", "DataSource", "接口状态", "失败原因", "重试结果", "Notes",
     ]
     return pd.DataFrame(rows, columns=columns)
 
@@ -1064,6 +1436,367 @@ def first_valid_text(*values, fallback: str = "") -> str:
     return text
 
 
+def is_dividend_stock_candidate(code: str, name: str, role: str, theme: str, asset_type: str, notes: str) -> bool:
+    """识别红利现金流个股；ETF红利低波仍按低波权益ETF处理。"""
+    normalized = format_code(code)
+    text = " ".join(str(value or "") for value in [name, role, theme, asset_type, notes])
+    is_stock = str(asset_type).strip().lower() == "stock"
+    return is_stock and (
+        normalized in DIVIDEND_CORE_STOCK_CODES
+        or normalized in DIVIDEND_ENHANCED_STOCK_CODES
+        or "红利个股" in text
+        or "红利现金流" in text
+        or "稳定分红" in text
+    )
+
+
+def dividend_stock_profile(code: str, name: str, role: str, theme: str, asset_type: str, notes: str) -> dict[str, str]:
+    """红利个股专用模板，防止把低波现金流层误判成成长突破仓。"""
+    if not is_dividend_stock_candidate(code, name, role, theme, asset_type, notes):
+        return {
+            "红利配置角色": "",
+            "分红质量检查": "",
+            "红利买点规则": "",
+            "高息陷阱否决": "",
+        }
+    normalized = format_code(code)
+    if normalized in DIVIDEND_CORE_STOCK_CODES:
+        role_text = "A档红利底仓候选"
+        single_limit = "初始0.5%–1%；成熟1.5%–3%"
+    else:
+        role_text = "B档红利增强候选"
+        single_limit = "初始0.3%–0.8%；成熟1%–2%"
+    return {
+        "红利配置角色": role_text,
+        "分红质量检查": "至少5年稳定分红；分红率30%–75%优先；经营现金流覆盖分红；盈利不连续明显下滑",
+        "红利买点规则": f"缩量回踩或横盘止跌；股息率安全垫达标；PE/PB处于历史中低位；{single_limit}",
+        "高息陷阱否决": "分红率>100%、高息来自股价暴跌、盈利/现金流恶化、举债分红、资本开支压力或只因快分红而买，均一票否决",
+    }
+
+
+def volume_structure_profile(code: str, name: str, role: str, theme: str, asset_type: str, notes: str) -> dict[str, str]:
+    """把V2.8.5补充模块转成每日表格可读的趋势结构纪律。"""
+    code = format_code(code)
+    text = " ".join(str(value or "") for value in [name, role, theme, asset_type, notes])
+    if is_index_code(code):
+        return {
+            "趋势结构": "指数锚点",
+            "关键支撑纪律": "只判断市场权限，不执行买卖",
+            "单次仓位上限": "不可交易",
+            "爆量/量质吸纪律": "仅用于双锚和风格强弱判断",
+        }
+    if code == "002594" or "2030战略观察" in text:
+        return {
+            "趋势结构": "2030战略观察：基本面+估值+技术三重确认",
+            "关键支撑纪律": "周线企稳，日线缩量回踩，不破前低，重新站回20/60日线",
+            "单次仓位上限": "现有底仓；合格加仓后全资产上限3%",
+            "爆量/量质吸纪律": "不做T不追涨；股价涨但利润不涨时暂停或减仓复审",
+        }
+    if "遗留仓" in text:
+        return {
+            "趋势结构": "遗留仓反弹复审",
+            "关键支撑纪律": "不因回踩补仓，反弹按退出纪律处理",
+            "单次仓位上限": "0（禁止新增）",
+            "爆量/量质吸纪律": "爆量只作减仓/退出复审，不作为买点",
+        }
+    if code == "159516":
+        return {
+            "趋势结构": "第一核心：爆量突破→缩量回踩→量质吸确认",
+            "关键支撑纪律": "不破爆量阳线低点/5日线/10日线；龙头不破位",
+            "单次仓位上限": "突破试探0.5%–1%；回踩≤1%；强确认1%–2%",
+            "爆量/量质吸纪律": "连续上涨不追；回踩确认后分批；放量滞涨暂停新增",
+        }
+    if code == "159381":
+        return {
+            "趋势结构": "AI硬件增强：龙头缩量企稳后的回踩确认",
+            "关键支撑纪律": "不破5日/10日；中际旭创/新易盛/天孚通信等龙头不破位",
+            "单次仓位上限": "观察ETF半额；回踩确认≤1%",
+            "爆量/量质吸纪律": "不追研报催化高开；优先级低于159516",
+        }
+    if code == "562500":
+        return {
+            "趋势结构": "核心持有：止跌三部曲/量质吸再启动",
+            "关键支撑纪律": "放量下跌结束→缩量企稳→不再创新低→次日红K",
+            "单次仓位上限": "当前持有不加；重新确认前为0",
+            "爆量/量质吸纪律": "不因回调直接补；等待龙头成分止跌和份额稳定",
+        }
+    if is_dividend_stock_candidate(code, name, role, theme, asset_type, notes):
+        return {
+            "趋势结构": "红利现金流：缩量回踩+股息率安全垫",
+            "关键支撑纪律": "不追除权/分红前冲高；优先缩量回调、横盘止跌、未放量破位",
+            "单次仓位上限": "A档0.5%–1%；B档0.3%–0.8%；红利个股组合先建3%–5%",
+            "爆量/量质吸纪律": "爆量上涨不是买点；红利股以现金流、估值安全垫和回踩确认优先",
+        }
+    if str(asset_type).strip().lower() == "stock" or "个股" in text:
+        return {
+            "趋势结构": "个股小仓验证：爆量后缩量回踩",
+            "关键支撑纪律": "不破爆量K线低点/平台下沿/5日线/10日线",
+            "单次仓位上限": "首仓0.3%–0.5%；单股≤1%，特殊龙头≤2%",
+            "爆量/量质吸纪律": "资产质量≥8、主线未退潮、无放量滞涨、情绪≤4",
+        }
+    if "ETF" in str(name) or str(asset_type).strip().upper() == "ETF":
+        return {
+            "趋势结构": "ETF回踩确认优先；突破只小仓试探",
+            "关键支撑纪律": "优先看爆量阳线低点、5日线、10日线、平台上沿",
+            "单次仓位上限": "突破试探0.5%–1%；回踩确认≤1%",
+            "爆量/量质吸纪律": "爆量不是买点；缩量回踩不破后再复核",
+        }
+    return {
+        "趋势结构": "等待回踩确认",
+        "关键支撑纪律": "关键位不破且次日转强后再复核",
+        "单次仓位上限": "需人工确认",
+        "爆量/量质吸纪律": "不因单日放量直接加仓",
+    }
+
+
+def cognitive_guardrail_profile(code: str, name: str, role: str, theme: str, asset_type: str, notes: str) -> dict[str, str]:
+    """把多元思维模型转成投资决策前的认知防错提示。"""
+    code = format_code(code)
+    text = " ".join(str(value or "") for value in [name, role, theme, asset_type, notes])
+    default_tree = "强势延续=持有不追；缩量回踩=小步复核；失败转弱=暂停/复审"
+    default_loss = "先估关键位跌破后的损失；逻辑好但赔率差不买"
+    default_bias = "若机会成本、反证、最大损失、能力圈中两项答不清，不买"
+
+    if is_index_code(code):
+        return {
+            "机会成本检查": "指数只作市场锚点，不占买入预算",
+            "认知防错": "避免把指数短线波动误读为单一标的买点",
+            "决策树情景": "双锚转强=开放复核；成长红=暂停新增；系统破位=只做风控",
+            "赔率/最大损失": "用于判断市场权限，不直接计算单标的赔率",
+            "反向失败路径": "宽基或成长锚持续弱于对照指数，说明市场权限下降",
+            "能力圈边界": "市场锚点，非交易标的",
+        }
+    if code == "002594" or "2030战略观察" in text:
+        return {
+            "机会成本检查": "不得挤占159516/159381等核心ETF预算；只用战略观察仓额度复核",
+            "认知防错": "优秀公司不等于立即加仓；避免信仰加仓、沉没成本和做T冲动",
+            "决策树情景": "基本面改善+估值安全垫+技术确认=小额复核；任一缺失=持有观察；风险信号出现=暂停/降级",
+            "赔率/最大损失": "上限按全资产3%控制；先估海外、利润率、现金流失败时的回撤空间",
+            "反向失败路径": "海外受阻、价格战恶化、净利率长期低于3%-4%、现金流恶化或股价涨但利润不涨",
+            "能力圈边界": "新能源战略观察，不是当前第一主线进攻仓",
+        }
+    if "遗留仓" in text:
+        return {
+            "机会成本检查": "占用核心主线和现金等待买点的资金效率，优先反弹压缩",
+            "认知防错": "亏损不是补仓理由；避免沉没成本、损失规避和做T冲动",
+            "决策树情景": "反弹转强=减仓复核；继续走弱=保持冻结；重新过主线/质量/买点才可升级",
+            "赔率/最大损失": "先看继续持有的机会成本和再次下跌空间",
+            "反向失败路径": "主线外、质量弱、放量滞涨或关键位跌破，继续降级",
+            "能力圈边界": "非当前核心能力圈，只允许退出复审",
+        }
+    if code == "159516":
+        return {
+            "机会成本检查": "新增资金第一优先；替代选择是159381/A500/可转债/现金等待回踩",
+            "认知防错": "不要因半导体利好刷屏确认偏误；必须找净赎回、龙头不涨、放量滞涨等反证",
+            "决策树情景": default_tree,
+            "赔率/最大损失": "只在回踩不破关键位时提高赔率；跌破爆量K低点暂停新增",
+            "反向失败路径": "订单不及预期、ETF连续净赎回、科创50弱于沪深300、龙头放量下跌",
+            "能力圈边界": "能力圈核心：AI基础设施/半导体设备ETF",
+        }
+    if code == "159381":
+        return {
+            "机会成本检查": "优先级低于159516；只有AI硬件赔率明显更优时才占用新增预算",
+            "认知防错": "AI利好和研报容易造成易得性偏差；必须核对龙头、份额、情绪和价格是否已反映",
+            "决策树情景": default_tree,
+            "赔率/最大损失": "高开低走、净赎回或接近日内低位时赔率差，不买",
+            "反向失败路径": "光模块/CPO/AI芯片龙头破位、资金退潮、估值透支",
+            "能力圈边界": "能力圈内增强仓，但不得超过159516优先级",
+        }
+    if code == "562500":
+        return {
+            "机会成本检查": "证券账户占比已高；新增资金机会成本通常高于159516/159381回踩",
+            "认知防错": "盈利仓看趋势，不因怕利润回吐乱卖；也不因回调直接补",
+            "决策树情景": "强势延续=持有不追；缩量企稳且次日红K=复审；放量下跌=暂停新增",
+            "赔率/最大损失": "等待止跌三部曲提高赔率；跌破关键位进入复审",
+            "反向失败路径": "龙头分化、放量滞涨、情绪过热、ETF份额退潮",
+            "能力圈边界": "能力圈核心持有，但当前纪律为持有不加",
+        }
+    if is_dividend_stock_candidate(code, name, role, theme, asset_type, notes):
+        return {
+            "机会成本检查": "红利个股使用低波现金流预算；先比较红利低波ETF、A500、现金等待和核心成长回踩",
+            "认知防错": "不要被高股息率锚定；先确认高息不是股价暴跌、盈利下滑或举债分红造成",
+            "决策树情景": "缩量回踩且股息率安全垫达标=小仓；冲高除权前=不追；削减分红/现金流恶化=降级",
+            "赔率/最大损失": "收益来自现金流稳定和波动降低；单只先小仓，跌破长期平台或分红逻辑恶化立即复审",
+            "反向失败路径": "利润连续下滑、现金流覆盖不足、分红率>100%、资本开支抬升或政策/周期冲击",
+            "能力圈边界": "红利现金流层，不能替代AI/半导体核心成长收益发动机",
+        }
+    if str(asset_type).strip().lower() == "stock" or "个股" in text:
+        return {
+            "机会成本检查": "个股资金机会成本高于核心ETF；首仓只用于验证，不替代159516/159381",
+            "认知防错": "先找反证：利好不涨、放量滞涨、龙头分化、财务/估值证据不足",
+            "决策树情景": "缩量回踩不破=小仓验证；强势上冲=不追；跌破爆量K低点=复审/止损",
+            "赔率/最大损失": "首仓0.3%–0.5%，先定义跌破关键位的最大亏损",
+            "反向失败路径": "订单/Capex下修、利润率恶化、估值透支、板块退潮",
+            "能力圈边界": "AI基础设施/半导体硬件能力圈内观察，未补完整评分前不买",
+        }
+    if "可转债" in text or "国债" in text or "红利" in text or "低波" in text or "防御" in text:
+        return {
+            "机会成本检查": "用于反脆弱结构和现金替代，不与核心成长仓直接抢进攻预算",
+            "认知防错": "不要因短期跑输科技而放弃冗余备份和安全边际",
+            "决策树情景": "市场过热=提高防御价值；回踩买点=提供弹药；系统走弱=缓冲波动",
+            "赔率/最大损失": "看组合波动降低和现金安全垫贡献，不追求单日弹性",
+            "反向失败路径": "估值拥挤、利率冲击或与宽基重复暴露过高",
+            "能力圈边界": "组合反脆弱与安全垫工具",
+        }
+    return {
+        "机会成本检查": "与159516、159381、A500/可转债、现金等待买点比较后再决定",
+        "认知防错": default_bias,
+        "决策树情景": default_tree,
+        "赔率/最大损失": default_loss,
+        "反向失败路径": "先研究它怎么失败，再决定是否复核买点",
+        "能力圈边界": "能力圈边界待确认，不能重仓",
+    }
+
+
+def quant_role_profile(code: str, name: str, role: str, theme: str, asset_type: str, notes: str) -> dict[str, str]:
+    """把量化交易文档中的资产角色差异，落成每日表格可读的执行模板。"""
+    code = format_code(code)
+    text = " ".join(str(value or "") for value in [name, role, theme, asset_type, notes])
+    name_text = str(name or "")
+    if is_index_code(code):
+        return {
+            "资产角色": "指数环境锚点",
+            "量化买点规则": "只记录涨跌、成交额、强弱和市场广度；不产生交易指令",
+            "正期望检查": "用于判断市场权限，不计算单标的期望收益",
+            "量化风控规则": "指数破位、成交萎缩或成长锚转红时降低权益新增权限",
+        }
+    if code == "002594" or "2030战略观察" in text:
+        return {
+            "资产角色": "2030战略观察个股",
+            "量化买点规则": "基本面至少3项改善，估值有安全垫，技术买点通过后才小额复核",
+            "正期望检查": "不能因亏损摊低成本；只有长期情景赔率优于核心ETF机会成本时才成立",
+            "量化风控规则": "海外/利润率/智能化/现金流恶化暂停加仓；估值先行透支则减仓或锁定利润",
+        }
+    if "遗留仓" in text:
+        return {
+            "资产角色": "降级/遗留仓",
+            "量化买点规则": "不使用买点规则新增；只看反弹减仓、跌破复审和机会成本",
+            "正期望检查": "沉没成本不计入期望收益；若继续持有弱于核心ETF/现金等待，则压缩",
+            "量化风控规则": "反弹无量、利好不涨、放量下跌或继续弱于主线时减仓/退出复审",
+        }
+    if code == "159516":
+        return {
+            "资产角色": "核心成长ETF",
+            "量化买点规则": "缩量回踩不破爆量K低点/5日/10日线，龙头同步，份额不连续赎回，次日转强",
+            "正期望检查": "新增资金第一优先，但只有回踩确认提高胜率且跌破关键位损失可控时才成立",
+            "量化风控规则": "连续上涨不追；净赎回、龙头不涨、放量滞涨或跌破爆量低点则暂停新增",
+        }
+    if code == "159381":
+        return {
+            "资产角色": "AI硬件增强ETF",
+            "量化买点规则": "光模块/CPO/AI芯片龙头缩量企稳，ETF不破5日/10日，次日重新放量转强",
+            "正期望检查": "必须优于159516/A500/可转债的机会成本，且不能被研报催化后的高开透支",
+            "量化风控规则": "高开低走、净赎回、硬件链龙头破位或估值透支时禁止新增",
+        }
+    if code == "562500":
+        return {
+            "资产角色": "核心持有ETF",
+            "量化买点规则": "持有不追；重新买点需放量下跌结束、缩量企稳、不再创新低、龙头止跌、次日红K",
+            "正期望检查": "当前新增机会成本通常高于159516/159381回踩，未完成止跌三部曲前不成立",
+            "量化风控规则": "放量滞涨、龙头分化、份额退潮或情绪≥4时暂停新增并复审",
+        }
+    if code in {"159338", "512890", "510210"} or any(key in text for key in ("A500", "红利低波", "上证指数")):
+        return {
+            "资产角色": "低波权益ETF",
+            "量化买点规则": "按配置节奏分批；不在指数大涨日追买，优先缩量回踩、权重股止跌、份额稳定",
+            "正期望检查": "以降低组合波动和改善全资产结构为收益来源，不和核心成长ETF比单日弹性",
+            "量化风控规则": "系统性破位、权重股集体破位或与宽基重复暴露过高时暂停新增/换仓",
+        }
+    if is_dividend_stock_candidate(code, name, role, theme, asset_type, notes):
+        return {
+            "资产角色": "红利现金流个股",
+            "量化买点规则": "分红连续性、现金流覆盖、股息率安全垫、历史中低估值和缩量回踩同时满足后分批",
+            "正期望检查": "正期望来自稳定现金分红+估值均值修复+组合波动降低，不来自短线突破追涨",
+            "量化风控规则": "削减分红、现金流低于分红、分红率过高且业绩下滑、政策/周期冲击时降级或退出",
+        }
+    if "可转债" in text:
+        return {
+            "资产角色": "弹性低波ETF",
+            "量化买点规则": "每次小额分批；股市不单边暴跌、转债估值不过热、ETF缩量回调或横盘企稳",
+            "正期望检查": "收益来自下跌缓冲与反弹弹性，不用于短线追涨或替代核心成长买点",
+            "量化风控规则": "转债溢价明显过热、利率快速上行或权益系统性下跌扩散时暂停新增",
+        }
+    if "国债" in text or "纯防御" in text:
+        return {
+            "资产角色": "纯防御ETF",
+            "量化买点规则": "作为现金安全垫和心理稳定器；不因短期跑输科技而切走",
+            "正期望检查": "期望收益来自保留弹药和降低组合断裂风险，不追求高弹性",
+            "量化风控规则": "权益仓提高时必须保留；利率急升或安全垫显著超目标时再复核",
+        }
+    if str(asset_type).strip().lower() == "stock" or "个股" in text:
+        return {
+            "资产角色": "卫星验证个股",
+            "量化买点规则": "质量≥8、主线未退潮、爆量后缩量回踩、不破爆量K低点、前排龙头、情绪≤4",
+            "正期望检查": "个股机会成本高于核心ETF；首仓只验证产业链弹性，先定义跌破关键位最大损失",
+            "量化风控规则": "订单/Capex下修、利润率恶化、放量滞涨、后排补涨或跌破关键位时快速复审",
+        }
+    if "ETF" in name_text.upper() or str(asset_type).strip().upper() == "ETF":
+        return {
+            "资产角色": "观察ETF",
+            "量化买点规则": "按资产角色重评分；不能套用核心成长ETF买点，不追单日放量",
+            "正期望检查": "先比较159516、159381、A500、可转债和现金等待买点",
+            "量化风控规则": "角色不清、证据不足、份额恶化或不在能力圈时只观察",
+        }
+    return {
+        "资产角色": "待分类资产",
+        "量化买点规则": "先补资产角色、质量评分、资金/价格结构与证伪条件",
+        "正期望检查": "未能估计胜率、赔率、失败损失和替代选择前不买",
+        "量化风控规则": "能力圈外或证据链不完整时只观察",
+    }
+
+
+def quant_validation_result(
+    *,
+    pass_items: list[str],
+    fail_items: list[str],
+    pending_items: list[str],
+    quality_value: float | None,
+    emotion_temperature: int,
+    veto: str,
+    hard_block_kind: str,
+) -> dict[str, object]:
+    """将买点过滤器六项检查转成 V2.8.5-Q 的10分制验证结果。"""
+    score = 0
+    score += min(2, sum(1 for item in pass_items if item in {"分时结构", "量价关系"}))
+    score += min(2, sum(1 for item in pass_items if item in {"份额/筹码", "折溢价/估值"}))
+    score += min(2, sum(1 for item in pass_items if item in {"龙头同步", "次日验证"}))
+    if quality_value is not None and quality_value >= QUALITY_CORE_MIN:
+        score += 1
+    elif quality_value is not None and quality_value >= QUALITY_OBSERVE_MIN:
+        score += 0.5
+    if emotion_temperature < EMOTION_PAUSE_LEVEL:
+        score += 1
+    if not fail_items and len(pending_items) <= 1:
+        score += 2
+    elif len(fail_items) <= 1:
+        score += 1
+    score = round(float(score), 1)
+
+    if hard_block_kind or veto == "是":
+        status = "阻断/不买"
+    elif score >= 8:
+        status = "标准量化验证"
+    elif score >= 6:
+        status = "黄灯观察"
+    elif score >= 4:
+        status = "不买"
+    else:
+        status = "风险复审"
+
+    if score >= 8 and veto != "是" and not hard_block_kind:
+        expected = f"通过{len(pass_items)}项，正期望可人工复核；先定义跌破关键位损失"
+    elif score >= 6 and veto != "是":
+        expected = f"通过{len(pass_items)}项，仍需补：{'、'.join(pending_items) if pending_items else '反证/赔率'}"
+    else:
+        blockers = "、".join(fail_items + pending_items[:2]) or "硬性阻断/证据不足"
+        expected = f"正期望不足或待补；主要约束：{blockers}"
+    return {
+        "量化验证分": score,
+        "量化验证状态": status,
+        "正期望检查": expected,
+    }
+
+
 # ==================== V2.8.5 质量、情绪与穿透风控 ====================
 def trading_session_progress(now: datetime | None = None) -> float:
     """Return the completed fraction of a normal A-share trading day."""
@@ -1096,6 +1829,8 @@ def volume_pace_ratio(amount, avg20_amount) -> float | None:
 
 def classify_theme(name: str, role: str = "") -> str:
     text = f"{name} {role}"
+    if any(key in text for key in ("红利现金流", "红利个股", "长江电力", "中国移动", "工商银行", "建设银行", "中国神华", "美的集团")):
+        return "红利现金流"
     if any(key in text for key in ("半导体", "芯片")):
         return "半导体/芯片设备"
     if any(key in text for key in ("人工智能", "云计算", "算力", "中望")):
@@ -1151,6 +1886,13 @@ def build_quality_score(watchlist: pd.DataFrame, market_data: pd.DataFrame) -> p
         is_etf = ("ETF" in name.upper() or asset_type == "etf") and not is_index
         manual_score = to_float(item.get("Manual Quality Score"))
         manual_evidence = str(item.get("Quality Evidence", "") or "").strip()
+        missing_quality_inputs: list[str] = []
+        if manual_score is None:
+            missing_quality_inputs.append("Manual Quality Score")
+        elif not 0 <= manual_score <= 10:
+            missing_quality_inputs.append("Manual Quality Score需0-10")
+        if not manual_evidence:
+            missing_quality_inputs.append("Quality Evidence")
 
         if is_index:
             proxy_score = None
@@ -1177,6 +1919,18 @@ def build_quality_score(watchlist: pd.DataFrame, market_data: pd.DataFrame) -> p
         effective_score = round(manual_score, 1) if valid_manual else None
         coverage = 1.0 if valid_manual else available / 10 if available else 0
         if is_index:
+            score_source = "不适用"
+            input_status = "指数锚点不参与质量评分"
+            missing_text = "无"
+        elif valid_manual:
+            score_source = "watchlist.csv人工完整评分"
+            input_status = "完整"
+            missing_text = "无"
+        else:
+            score_source = "代理展示，不放行"
+            input_status = "待补"
+            missing_text = "、".join(missing_quality_inputs) if missing_quality_inputs else "完整评分未确认"
+        if is_index:
             status = "不适用"
         elif effective_score is None:
             status = "数据不足，需人工评分"
@@ -1199,6 +1953,9 @@ def build_quality_score(watchlist: pd.DataFrame, market_data: pd.DataFrame) -> p
                 "折算质量分": effective_score,
                 "数据完整度": coverage,
                 "质量状态": status,
+                "评分来源": score_source,
+                "评分输入状态": input_status,
+                "评分缺失项": missing_text,
                 "评分明细": detail,
                 "数据边界": "代理分不得折算放行；完整人工评分必须同时填写分数与证据",
             }
@@ -1330,7 +2087,7 @@ def build_exposure_summary(positions_sheet: pd.DataFrame, account_meta: dict[str
                 "上限剩余额度": max(tech_limit - tech_weight, 0.0),
                 "上限状态": "超限" if tech_weight > tech_limit else "范围内",
                 "风控口径": "全资产穿透",
-                "风险提示": "科技成长全资产穿透上限45%",
+                "风险提示": "科技成长全资产穿透目标/上限按45%-50%复核",
             },
         )
     return pd.DataFrame(groups + detail.to_dict("records"), columns=detail.columns)
@@ -1349,16 +2106,19 @@ def build_first_year_allocation(
         format_code(row.get("Code")): to_float(row.get("Market Value")) or 0
         for _, row in positions_sheet.iterrows()
     }
+    cash_like_by_code = {
+        "CASH": to_float(account_meta.get("available_cash")) or 0,
+    }
     rows: list[dict[str, object]] = []
     for _, item in allocation.iterrows():
         codes = [format_code(code) for code in str(item.get("Codes", "")).split("|") if str(code).strip()]
-        current_amount = sum(market_value_by_code.get(code, 0) for code in codes)
+        current_amount = sum(market_value_by_code.get(code, cash_like_by_code.get(code, 0)) for code in codes)
         target_weight = to_float(item.get("TargetWeight")) or 0
         source_target = to_float(item.get("SourceTargetAmount"))
         source_current = to_float(item.get("SourceCurrentAmount"))
         dynamic_target = total_assets * target_weight if total_assets else source_target
         gap = (dynamic_target - current_amount) if dynamic_target is not None else None
-        completion = current_amount / dynamic_target if dynamic_target else None
+        completion = current_amount / dynamic_target if dynamic_target else 0.0
         current_weight = current_amount / total_assets if total_assets else None
         if not codes:
             progress_status = "待选择合格标的"
@@ -1445,6 +2205,176 @@ def attach_first_year_fields(frame: pd.DataFrame, first_year: pd.DataFrame) -> p
     return output
 
 
+STAGE_BANDS = [
+    ("观察池", 0.00, 0.00),
+    ("观察仓", 0.00, 0.20),
+    ("验证仓", 0.20, 0.40),
+    ("核心仓", 0.40, 0.70),
+    ("目标仓", 0.70, 1.00),
+]
+
+
+def stage_band_for_ratio(ratio: float | None) -> tuple[str, float | None, float | None]:
+    """按第一年目标完成度划分阶段，不让年度缺口直接变成买入信号。"""
+    if ratio is None:
+        return "不适用", None, None
+    if ratio <= 0:
+        return "观察池", 0.0, 0.0
+    if ratio < 0.20:
+        return "观察仓", 0.0, 0.20
+    if ratio < 0.40:
+        return "验证仓", 0.20, 0.40
+    if ratio < 0.70:
+        return "核心仓", 0.40, 0.70
+    if ratio < 1.00:
+        return "目标仓", 0.70, 1.00
+    return "已达第一年目标", 1.00, 1.00
+
+
+def is_core_low_config_candidate(row: pd.Series) -> bool:
+    text = " ".join(
+        str(row.get(column, "") or "")
+        for column in ["Name", "Role", "资产角色", "年度配置项", "趋势结构"]
+    )
+    core_keywords = ("核心", "半导体", "人工智能", "AI", "机器人", "创新药")
+    downgrade_keywords = ("遗留", "降级", "禁止新增", "指数锚点")
+    return any(keyword in text for keyword in core_keywords) and not any(keyword in text for keyword in downgrade_keywords)
+
+
+def evaluate_stage_progression(row: pd.Series) -> dict[str, object]:
+    target_weight = to_float(first_valid(row.get("目标仓位"), row.get("全资产目标仓位"), row.get("年度全资产目标")))
+    current_weight = to_float(first_valid(row.get("当前仓位"), row.get("全资产当前仓位")))
+    remaining_weight = to_float(first_valid(row.get("剩余额度"), row.get("全资产剩余额度"), row.get("年度资金缺口")))
+    quality_value = to_float(row.get("质量评分"))
+    temperature = to_float(row.get("情绪温度"))
+    signal = str(row.get("买点灯号", "灰") or "灰")
+    veto = str(row.get("一票否决", "否") or "否")
+    decision_basis = str(row.get("仓位决策口径", "") or "")
+    reason = clean_blocker_reason(row.get("否决原因", "")) or clean_blocker_reason(row.get("阻断原因", ""))
+
+    ratio = None
+    if target_weight is not None and target_weight > 0 and current_weight is not None:
+        ratio = current_weight / target_weight
+    stage, lower, upper = stage_band_for_ratio(ratio)
+    stage_verified = "是" if signal in {"绿", "黄"} and veto == "否" else "否"
+
+    if "指数锚点" in decision_basis:
+        conclusion = "不适用"
+        blocker = "指数只作市场锚点，不参与加仓阶段推进"
+    elif target_weight is None:
+        conclusion = "暂停/降级"
+        blocker = "缺少第一年配置目标，不能用证券账户仓位替代"
+    elif current_weight is None:
+        conclusion = "暂停/降级"
+        blocker = "当前全资产仓位缺失，先核对持仓"
+    elif remaining_weight is not None and remaining_weight <= 0:
+        conclusion = "已达目标"
+        blocker = "已达或超过第一年目标，不因强势继续加仓"
+    elif quality_value is not None and quality_value < QUALITY_CORE_MIN and is_core_low_config_candidate(row):
+        conclusion = "等待"
+        blocker = f"核心候选质量分{quality_value:.1f}低于{QUALITY_CORE_MIN:.0f}分"
+    elif temperature is not None and temperature >= EMOTION_PAUSE_LEVEL:
+        conclusion = "暂停/降级"
+        blocker = f"情绪温度{temperature:.0f}级，暂停新增"
+    elif veto == "是" or signal == "红":
+        conclusion = "暂停/降级"
+        blocker = reason or "买点过滤器存在一票否决或红灯"
+    elif ratio is not None and upper is not None and ratio >= upper and stage_verified == "是":
+        conclusion = "允许下一档"
+        blocker = "当前阶段已达标且买点验证通过"
+    elif stage_verified == "是":
+        conclusion = "补足当前阶段"
+        blocker = "买点验证通过，但当前阶段尚未达上沿"
+    elif is_core_low_config_candidate(row) and quality_value is not None and quality_value >= QUALITY_CORE_MIN and signal != "红":
+        conclusion = "小额防踏空"
+        blocker = "核心低配但买点未完整确认，只允许小额试探"
+    else:
+        conclusion = "等待"
+        blocker = reason or "阶段验证未完成，年度缺口不是买入信号"
+
+    if conclusion == "允许下一档":
+        single_limit = min(remaining_weight or 0.0, 0.015)
+        action_note = "打开下一阶段复核；仍优先回踩确认，不突破追满。"
+    elif conclusion == "补足当前阶段":
+        stage_room = max((target_weight or 0.0) * (upper or 0.0) - (current_weight or 0.0), 0.0)
+        single_limit = min(remaining_weight or stage_room or 0.0, stage_room or 0.0, 0.010)
+        action_note = "只补当前阶段上沿以内，不自动跨入下一档。"
+    elif conclusion == "小额防踏空":
+        single_limit = min(remaining_weight or 0.0, 0.005)
+        action_note = "单次小额验证，买后必须设置确认位和撤销条件。"
+    else:
+        single_limit = 0.0
+        action_note = "不新增；记录下一次触发条件。"
+
+    return {
+        "阶段状态": stage,
+        "阶段目标下限": lower,
+        "阶段目标上限": upper,
+        "阶段占用率": ratio,
+        "阶段验证": stage_verified,
+        "阶段推进结论": conclusion,
+        "下一档单次上限": single_limit,
+        "阶段阻断原因": blocker,
+        "阶段动作说明": action_note,
+    }
+
+
+def apply_stage_progression_fields(frame: pd.DataFrame) -> pd.DataFrame:
+    if frame.empty:
+        return frame.copy()
+    result = frame.copy()
+    stage_rows = [evaluate_stage_progression(row) for _, row in result.iterrows()]
+    stage_df = pd.DataFrame(stage_rows, index=result.index)
+    for column in stage_df.columns:
+        result[column] = stage_df[column]
+    return result
+
+
+def build_stage_progression_view(buy_filter: pd.DataFrame, market_permission: str) -> pd.DataFrame:
+    if buy_filter.empty:
+        return pd.DataFrame(
+            columns=[
+                "Code", "Name", "资产角色", "年度配置项", "买点灯号", "质量评分", "情绪温度",
+                "阶段状态", "阶段目标下限", "阶段目标上限", "阶段占用率", "阶段验证",
+                "全资产当前仓位", "全资产目标仓位", "全资产剩余额度",
+                "阶段推进结论", "下一档单次上限", "阶段阻断原因", "阶段动作说明", "市场权限",
+            ]
+        )
+    result = apply_stage_progression_fields(buy_filter)
+    result["市场权限"] = market_permission
+    if market_permission != "开放买点复核":
+        eligible = result["阶段推进结论"].isin(["允许下一档", "补足当前阶段", "小额防踏空"])
+        result.loc[eligible, "阶段阻断原因"] = "市场权限未开放，阶段结论降为等待"
+        result.loc[eligible, "阶段动作说明"] = "等待市场权限恢复后再复核。"
+        result.loc[eligible, "下一档单次上限"] = 0.0
+        result.loc[eligible, "阶段推进结论"] = "等待"
+
+    rank = {
+        "允许下一档": 0,
+        "补足当前阶段": 1,
+        "小额防踏空": 2,
+        "等待": 3,
+        "暂停/降级": 4,
+        "已达目标": 5,
+        "不适用": 6,
+    }
+    result["_stage_rank"] = result["阶段推进结论"].map(rank).fillna(9)
+    result["_quality_rank"] = pd.to_numeric(result.get("质量评分"), errors="coerce").fillna(-1)
+    result["_remaining_rank"] = pd.to_numeric(result.get("全资产剩余额度"), errors="coerce").fillna(-1)
+    result = result.sort_values(
+        ["_stage_rank", "_quality_rank", "_remaining_rank"],
+        ascending=[True, False, False],
+        kind="stable",
+    ).drop(columns=["_stage_rank", "_quality_rank", "_remaining_rank"])
+    columns = [
+        "Code", "Name", "资产角色", "年度配置项", "买点灯号", "质量评分", "情绪温度",
+        "阶段状态", "阶段目标下限", "阶段目标上限", "阶段占用率", "阶段验证",
+        "全资产当前仓位", "全资产目标仓位", "全资产剩余额度",
+        "阶段推进结论", "下一档单次上限", "阶段阻断原因", "阶段动作说明", "市场权限",
+    ]
+    return result[[column for column in columns if column in result.columns]].reset_index(drop=True)
+
+
 def build_framework_rules(
     decision_inputs: dict[str, dict[str, str]],
     first_year: pd.DataFrame | None = None,
@@ -1453,17 +2383,77 @@ def build_framework_rules(
     cash_min = decision_input_number(decision_inputs, "cash_buffer_min") or 300000
     cash_target = decision_input_number(decision_inputs, "cash_buffer_target") or 500000
     rows = [
+        ("总决策链", "执行顺序", "产业主线→主线周期→双锚系统→资产质量→量化验证层→爆量/回踩/量质吸结构→买点过滤器→情绪温度→认知防错层→仓位执行→复盘迭代", "V2.8.5-QM 主线周期 + 量化验证 + 认知防错增强版"),
+        ("主线周期", "六阶段", MAINLINE_CYCLE_STAGES, "V2.8.5 第五部分"),
+        ("量化验证层", "模块定位", "主观框架定方向；量化模块负责验证信号、减少情绪误判、提高执行纪律和风险监控", QUANT_MODULE_SOURCE),
+        ("量化验证层", "正期望原则", "期望收益=胜率×平均盈利-失败率×平均亏损；不是固定追求高胜率低赔率，而是追求经复核后的正期望", QUANT_MODULE_SOURCE),
+        ("量化验证层", "三项职责", "数据验证层：指数环境/ETF买点/情绪温度；执行纪律层：所有买点打分；风险监控层：退潮、赎回、放量滞涨、次日验证", QUANT_MODULE_SOURCE),
+        ("量化验证层", "模型边界", "用模型约束人脑而非替代人脑；人脑提出假设→数据验证假设→模型执行规则→复盘修正模型", QUANT_MODULE_SOURCE),
+        ("量化验证层", "产品边界", "ETF主框架可叠加指数增强/Smart Beta作为低波权益补充；个人不做高频、不碰复杂黑箱、不让量化替代主线判断", QUANT_MODULE_SOURCE),
+        ("量化验证层", "10分制动作", "8-10标准买点；6-7黄灯观察；4-5不买；低于4风险复审；资金流入不能单独触发买入，必须价格结构确认", QUANT_MODULE_SOURCE),
+        ("量化验证层", "核心ETF六项", "分时结构0-2；量价关系0-2；ETF份额0-2；折溢价0-1；龙头同步0-2；次日验证0-1", QUANT_MODULE_SOURCE),
+        ("资产角色", "核心成长ETF", "产业逻辑决定方向；双锚决定权限；买点过滤器决定能不能买；量化打分决定买多少；只买缩量回踩不破+次日转强", QUANT_MODULE_SOURCE),
+        ("资产角色", "低波权益ETF", "A500/红利低波按配置节奏分批，不追强；用于降低组合波动，不当现金安全垫", QUANT_MODULE_SOURCE),
+        ("资产角色", "红利现金流个股", "红利个股归入低波现金流层；买稳定分红和现金流，不买高息幻觉；不能替代半导体/AI硬件核心成长仓", DIVIDEND_STOCK_SOURCE),
+        ("红利个股", "行业优先级", "优先公用事业/运营商/水电，其次国有大行，再看能源资源红利，质量消费红利作为增强；不按股息率从高到低机械排序", DIVIDEND_STOCK_SOURCE),
+        ("红利个股", "买入绿灯", "分红连续性至少5年稳定分红；分红率30%–75%；经营现金流覆盖分红；盈利不连续明显下滑；股息率安全垫达标；估值历史中低；缩量回踩止跌", DIVIDEND_STOCK_SOURCE),
+        ("红利个股", "高息陷阱否决", "分红率>100%、高息源于股价暴跌、盈利/现金流恶化、举债分红、资本开支压力、周期盈利高点或只因快分红而买，一票否决", DIVIDEND_STOCK_SOURCE),
+        ("红利个股", "仓位节奏", "红利个股+红利低波初始3%–5%；第一阶段6%–8%；稳定后10%–15%；单只A档初始0.5%–1%，B档0.3%–0.8%", DIVIDEND_STOCK_SOURCE),
+        ("红利个股", "复审退出", "跌10%复核风格；跌15%强制复审分红逻辑；跌20%且利润/现金流恶化至少减半；削减分红或现金流低于分红则降级/退出", DIVIDEND_STOCK_SOURCE),
+        ("资产角色", "弹性低波ETF", "可转债ETF用于缓冲与反弹弹性；每次小额分批，不在转债大涨日追", QUANT_MODULE_SOURCE),
+        ("资产角色", "纯防御ETF", "国债ETF只做安全垫和保险丝；可以与现金共同计入防御层，不因短期跑输科技而频繁切换", QUANT_MODULE_SOURCE),
+        ("资产角色", "降级/遗留仓", "云计算、绿电、中望等不补仓；反弹压缩或退出复审，释放资金给核心主线与现金等待买点", QUANT_MODULE_SOURCE),
+        ("资产角色", "比亚迪2030战略观察仓", "现有9–10万元作为底仓；基本面确认、估值安全垫、技术买点同时通过后才小额复核；合格加仓后全资产上限3%", "V2.8.5比亚迪2030战略配置完整稿"),
+        ("资产角色", "卫星验证个股", "个股不能替代ETF主仓；只做小仓验证，首仓0.3%-0.5%，必须先定义证伪和最大损失", QUANT_MODULE_SOURCE),
+        ("趋势买点", "启用条件", "双锚至少黄绿；标的属于主线或核心观察方向；质量评分≥8；情绪不进入狂热；无一票否决", "V2.8.5 第九部分"),
+        ("趋势买点", "优先级", TREND_BUY_PRIORITY, "V2.8.5 第九部分"),
+        ("爆量/量质吸", "模块定位", "不能单独产生买入信号；必须服从主线周期、双锚、资产质量、买点过滤、情绪和仓位纪律", V285_SUPPLEMENT_SOURCE),
+        ("爆量/量质吸", "核心路径", VOLUME_ABSORPTION_SEQUENCE, V285_SUPPLEMENT_SOURCE),
+        ("爆量突破", "启用条件", "核心主线；双锚至少黄绿；质量评分≥8；情绪≤4；份额/资金或成交额确认；突破平台/压力位", V285_SUPPLEMENT_SOURCE),
+        ("健康爆量", "执行上限", "爆量突破只允许小仓试探：ETF全资产0.5%–1%；个股全资产0.3%–0.5%；不得一次补满目标仓位", V285_SUPPLEMENT_SOURCE),
+        ("回踩确认", "最佳买点", "爆量后缩量回踩；不破爆量K低点/5日线/10日线；龙头不破；ETF份额未连续净赎回；次日转强", V285_SUPPLEMENT_SOURCE),
+        ("回踩确认", "执行上限", "核心ETF≤1%；强确认核心ETF1%–2%；个股≤0.5%；高弹性个股≤0.3%；后排个股不买", V285_SUPPLEMENT_SOURCE),
+        ("量质吸", "成立条件", "核心主线、双锚未红、前期放量、回踩缩量、不再创新低、龙头不破、份额未连续赎回、次日红K/放量转强；≥5观察，≥6候选", V285_SUPPLEMENT_SOURCE),
+        ("爆量失败", "复审/停止", "低开低走、跌破爆量K低点、放量滞涨/下跌、龙头分化、ETF连续赎回等；1项暂停新增，2项战术仓复审，3项以上核心仓降温", V285_SUPPLEMENT_SOURCE),
+        ("关键支撑", "ETF/个股", "ETF优先爆量阳线低点、5日线、10日线、平台上沿；个股优先爆量K低点、平台下沿、5日线、10日线、前一日低点", V285_SUPPLEMENT_SOURCE),
+        ("认知防错层", "模块定位", "不推翻主线周期、双锚、趋势买点、买点过滤、情绪温度和仓位纪律；只用于防止情绪、偏误、沉没成本和机会成本误导", MENTAL_MODEL_SOURCE),
+        ("认知防错层", "认知防错八问", "机会成本是什么；是否只看支持观点的信息；是否被近期新闻/涨幅影响；是否因亏损不愿卖；最大亏损是多少；是否有更优全资产选择；是否在能力圈内；10个月后是否仍认可", MENTAL_MODEL_SOURCE),
+        ("认知防错层", "两项不清则不买", "机会成本、反证、最大损失、能力圈边界等核心问题中有两项回答不清，禁止新增", MENTAL_MODEL_SOURCE),
+        ("思维模型", "机会成本", "买入前必须比较159516、159381、A500/可转债、现金等待买点等替代选择；新增资金优先级默认159516 > 159381 > A500/可转债 > 机器人 > 比亚迪2030观察 > 云计算/非核心", MENTAL_MODEL_SOURCE),
+        ("思维模型", "局部最优/全局最优", "证券账户局部最优不等于480万全资产全局最优；所有仓位判断以全资产穿透口径为最终标准", MENTAL_MODEL_SOURCE),
+        ("思维模型", "决策树", "每个核心标的至少给出强势延续、缩量回踩、失败转弱三种情景与动作", MENTAL_MODEL_SOURCE),
+        ("思维模型", "沉没成本", "亏损不是继续持有或加仓的理由；只有主线、资产质量、买点重新通过，才有资格继续配置", MENTAL_MODEL_SOURCE),
+        ("思维模型", "易得性/确认偏误", "利好后必须找相反数据：ETF净赎回、龙头利好不涨、情绪过热、信息是否已被价格反映", MENTAL_MODEL_SOURCE),
+        ("思维模型", "损失规避/前景理论", "盈利仓看趋势，亏损仓看逻辑，不用盈亏金额决定买卖，避免亏损仓越跌越补", MENTAL_MODEL_SOURCE),
+        ("思维模型", "风险概率", "买入前同时判断胜率、赔率、跌破关键位损失和全资产影响；逻辑好但赔率差不买", MENTAL_MODEL_SOURCE),
+        ("思维模型", "反向失败", "先研究它怎么失败，再决定是否买；退潮三因子与失败路径优先于乐观叙事", MENTAL_MODEL_SOURCE),
+        ("思维模型", "反脆弱", "核心成长负责收益，低波权益负责稳定，可转债负责弹性缓冲，现金/国债负责回踩买点弹药", MENTAL_MODEL_SOURCE),
+        ("思维模型", "安全边际/冗余/断裂点", "不在情绪温度4级以上追高；保留现金国债可转债；个股跌破爆量K低点复审，战术仓止损", MENTAL_MODEL_SOURCE),
+        ("思维模型", "能力圈", "AI基础设施、半导体设备、机器人ETF、AI硬件ETF、ETF资金/份额/买点过滤、全资产仓位管理为当前能力圈；圈外只能观察", MENTAL_MODEL_SOURCE),
+        ("思维模型", "复利", "提高决策质量而非交易频率；长期主线、正确仓位、持续复盘、少犯大错、关键买点加核心仓", MENTAL_MODEL_SOURCE),
+        ("主线退潮", "三因子", f"{RETREAT_THREE_FACTORS}；三者共振时从进攻切换为防守", "V2.8.5 第十二部分"),
+        ("全资产目标", "三年目标结构", "核心成长45%-50%；低波权益15%-20%；弹性低波8%-12%；纯防御20%-25%；战术机会5%-8%", "V2.8.5 第十三部分"),
+        ("全资产目标", "第一年结构迁移", "核心成长30%-35%；低波权益/混合18%-22%；弹性低波8%-10%；纯防御35%-40%；战术仓3%-5%", "V2.8.5 第十四部分"),
+        ("仓位口径", "买入/减仓主口径", "以总资产/第一年配置要求为准；证券账户仓位只作交易集中度参考，不替代年度全资产目标", "第一年配置方案和建议.docx"),
         ("质量准入", "核心候选", f"完整评分 ≥ {QUALITY_CORE_MIN:.0f}", "V2.8.5 第三部分"),
         ("质量准入", "观察候选", f"{QUALITY_OBSERVE_MIN:.0f} ≤ 完整评分 < {QUALITY_CORE_MIN:.0f}", "V2.8.5 第三部分"),
         ("质量准入", "禁止新增", f"完整评分 < {QUALITY_OBSERVE_MIN:.0f}；或缺少完整评分/证据", "V2.8.5 第三部分"),
         ("买点过滤", "标准首批", f"六项中通过 ≥ {BUY_STANDARD_MIN}，且无一票否决", "V2.8.5 第六部分"),
         ("买点过滤", "半额首批", f"六项中通过 = {BUY_HALF_MIN}，且无一票否决", "V2.8.5 第六部分"),
+        ("买点过滤", "与爆量/量质吸关系", "先判断趋势结构是否存在，再用买点过滤器确认是否可以买，最后用情绪温度和仓位系统决定买多少", V285_SUPPLEMENT_SOURCE),
         (
             "买点过滤",
             "建议买入区间",
             "完整近期行情下按昨日低点与日内回踩区间复核；仓位已满仅保留观察区间；不自动下单",
             "V2.8.4/V2.8.5 买点与行为纪律",
         ),
+        ("当前核心方向", "159516 半导体设备ETF", "第一核心候选；连续上涨不追；缩量回踩5/10日且龙头不破、份额不连续赎回、次日转强后分批", V285_SUPPLEMENT_SOURCE),
+        ("当前核心方向", "159381 创业板人工智能ETF", "AI硬件增强仓；不追研报催化高开；等光模块/CPO/AI芯片龙头缩量企稳后的回踩确认", V285_SUPPLEMENT_SOURCE),
+        ("当前核心方向", "562500 机器人ETF", "核心持有仓；当前不因回调直接补仓；必须等放量下跌结束、缩量企稳、不再创新低、次日红K确认", V285_SUPPLEMENT_SOURCE),
+        ("当前核心方向", "AI/半导体个股篮子", "资产质量≥8、主线未退潮、爆量后缩量回踩、不破爆量K低点、无放量滞涨、情绪≤4；首仓0.3%–0.5%", V285_SUPPLEMENT_SOURCE),
+        ("当前核心方向", "比亚迪2030战略观察仓", "不是第一主线进攻仓；跟踪海外销量、净利率、智能化、高端品牌和现金流；不做T不追涨，不挤占核心ETF预算", "V2.8.5比亚迪2030战略配置完整稿"),
+        ("当前持仓影响", "中望软件/绿电/云计算", "沉没成本不构成补仓理由；非核心仓位只做反弹压缩或退出复审，释放资金给核心主线和现金等待买点", MENTAL_MODEL_SOURCE),
+        ("当前持仓影响", "比亚迪", "从普通遗留仓单列为2030战略观察仓；亏损不是补仓理由，只有三重确认通过后才小额复核", "V2.8.5比亚迪2030战略配置完整稿"),
         ("情绪纪律", "暂停新增", f"情绪温度 ≥ {EMOTION_PAUSE_LEVEL}", "V2.8.5 第八部分"),
         ("执行纪律", "单日动作上限", "一个买入方向 + 两个卖出/减仓方向", "V2.8.4/V2.8.5"),
         ("现金安全垫", "最低值", f"{cash_min:,.0f}元", "V2.8.4 第十三部分"),
@@ -1498,7 +2488,13 @@ def build_checks(
     weight_sum = pd.to_numeric(positions.get("Weight"), errors="coerce").fillna(0).sum()
     broker_market_value = to_float(account_meta.get("broker_market_value"))
     position_ratio = to_float(account_meta.get("position_ratio"))
-    missing_quotes = int(market_data["Latest"].isna().sum())
+    missing_quotes = int(missing_latest_mask(market_data["Latest"]).sum())
+    interface_not_ready = int(
+        market_data.get("接口状态", pd.Series(index=market_data.index, dtype=object))
+        .astype(str)
+        .str.contains("未刷新|失败|缺失", regex=True, na=False)
+        .sum()
+    )
     quality_missing = int((quality_score["质量状态"] == "数据不足，需人工评分").sum())
     watch_codes = watchlist["Code"].astype(str)
     position_codes = positions["Code"].astype(str)
@@ -1511,10 +2507,11 @@ def build_checks(
     add("持仓市值合计", market_value_sum, broker_market_value, mv_diff, 1.0, "OK" if mv_diff is not None and abs(mv_diff) <= 1 else "检查", "核对截图总市值与各持仓市值")
     weight_diff = weight_sum - position_ratio if position_ratio is not None else None
     add("持仓权重合计", weight_sum, position_ratio, weight_diff, 0.001, "OK" if weight_diff is not None and abs(weight_diff) <= 0.001 else "检查", "单只权重四舍五入可能产生小差异")
-    add("行情完整性", missing_quotes, 0, missing_quotes, 0, "OK" if missing_quotes == 0 else "检查", "重新运行或核对缺失代码")
+    add("行情完整性", missing_quotes, 0, missing_quotes, 0, "OK" if missing_quotes == 0 else "检查", "联网重跑或核对缺失代码；详见Market_Data接口状态")
+    add("行情接口诊断", interface_not_ready, 0, interface_not_ready, 0, "OK" if interface_not_ready == 0 else "检查", "查看Market_Data失败原因与重试结果，禁止用旧行情替代")
     add("观察池重复代码", int(watch_codes.duplicated().sum()), 0, int(watch_codes.duplicated().sum()), 0, "OK" if not watch_codes.duplicated().any() else "检查", "删除重复观察项")
     add("持仓重复代码", int(position_codes.duplicated().sum()), 0, int(position_codes.duplicated().sum()), 0, "OK" if not position_codes.duplicated().any() else "检查", "合并重复持仓")
-    add("质量评分缺失", quality_missing, 0, quality_missing, 0, "待补" if quality_missing else "OK", "在watchlist.csv填写完整评分与证据；缺失时不得新增")
+    add("质量评分缺失", quality_missing, 0, quality_missing, 0, "待补" if quality_missing else "OK", "在watchlist.csv填写Manual Quality Score与Quality Evidence；不依赖行情接口")
     total_assets = to_float(account_meta.get("total_assets"))
     account_total = to_float(account_meta.get("account_total"))
     add("全资产口径", total_assets, ">=证券账户总资产", None, 0, "OK" if total_assets and account_total and total_assets >= account_total else "检查", "核对total_assets与account_total口径")
@@ -1678,8 +2675,8 @@ def build_positions_sheet(
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
     生成 Positions 工作表，并计算：
-    - 最新价、市值、盈亏、仓位占比
-    - 是否超过目标权重
+    - 最新价、市值、盈亏、证券账户仓位与全资产穿透仓位
+    - 证券账户目标只作为集中度参考，不直接触发买入/减仓建议
     """
     market_by_code = market_data.set_index("Code")
     account_total = account_meta.get("account_total", 0)
@@ -1738,18 +2735,12 @@ def build_positions_sheet(
         weight = first_valid(broker_weight, weight)
 
         discipline = action
+        broker_concentration_note = ""
         target_weight_f = to_float(target_weight)
         if target_weight_f is not None and weight is not None:
             try:
                 if float(weight) > target_weight_f + 0.005:
-                    discipline = "超目标，考虑减仓"
-                    alerts.append(
-                        {
-                            "Code": code,
-                            "Name": item.get("Name", ""),
-                            "提醒": f"当前仓位 {weight:.2%} 高于目标 {target_weight_f:.2%}",
-                        }
-                    )
+                    broker_concentration_note = f"证券账户仓位 {weight:.2%} 高于参考目标 {target_weight_f:.2%}；仅作集中度参考，减仓以全资产第一年配置为准"
             except (TypeError, ValueError):
                 pass
 
@@ -1776,6 +2767,7 @@ def build_positions_sheet(
                 "Role": role,
                 "Target Weight": target_weight,
                 "Weight Gap": round(float(weight) - target_weight_f, 4) if weight is not None and target_weight_f is not None else None,
+                "证券账户集中度提示": broker_concentration_note,
                 f"{FRAMEWORK_VERSION} Action": discipline,
             }
         )
@@ -1936,15 +2928,21 @@ def build_dashboard(
 ) -> pd.DataFrame:
     """生成 Dashboard 摘要页。"""
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    live_sources = {"行情接口", "东方财富补齐", "腾讯行情补齐"}
     source_series = market_data.get("DataSource", pd.Series(index=market_data.index, dtype=object)).astype(str)
-    missing_count = ((~source_series.isin(live_sources)) | market_data["Latest"].isna()).sum()
+    interface_series = market_data.get("接口状态", pd.Series(index=market_data.index, dtype=object)).astype(str)
+    interface_not_ready = interface_series.str.contains("未刷新|缺失|失败", regex=True, na=False)
+    missing_count = ((~source_series.isin(LIVE_QUOTE_SOURCES)) | missing_latest_mask(market_data["Latest"]) | interface_not_ready).sum()
     quote_times = market_data.get("QuoteTime", pd.Series(index=market_data.index, dtype=object)).dropna().astype(str)
     market_as_of = quote_times.max() if not quote_times.empty else "未取到当日接口时间"
     source_summary = " / ".join(
         f"{source}:{count}"
         for source, count in source_series.value_counts().sort_index().items()
     )
+    interface_summary = " / ".join(
+        f"{status}:{count}"
+        for status, count in interface_series.value_counts().sort_index().items()
+        if status and status.lower() != "nan"
+    ) or "未生成接口诊断"
 
     anchor_row = double_anchor[double_anchor["锚点"] == "综合灯号"]
     anchor_light = anchor_row.iloc[0]["灯号"] if not anchor_row.empty else "待确认"
@@ -1953,6 +2951,7 @@ def build_dashboard(
     emotion_reliability = str(temp_row.iloc[0].get("可靠性", "待确认")) if not temp_row.empty else "待确认"
     green_count = int((buy_filter["买点灯号"] == "绿").sum()) if not buy_filter.empty else 0
     yellow_count = int((buy_filter["买点灯号"] == "黄").sum()) if not buy_filter.empty else 0
+    dividend_stock_count = int((buy_filter.get("资产角色", pd.Series(dtype=object)).astype(str) == "红利现金流个股").sum()) if not buy_filter.empty else 0
     quality_ready = int(quality_score["质量状态"].isin(["核心候选", "观察候选"]).sum()) if not quality_score.empty else 0
     quality_missing = int((quality_score["质量状态"] == "数据不足，需人工评分").sum()) if not quality_score.empty else 0
     account_total = to_float(account_meta.get("account_total"))
@@ -1970,11 +2969,14 @@ def build_dashboard(
     cash_status = "达标" if liquidity_buffer >= cash_min else "低于最低安全垫"
 
     rows = [
-        {"项目": "版本", "内容": f"{FRAMEWORK_VERSION} {PRODUCT_NAME}"},
+        {"项目": "版本", "内容": f"{FRAMEWORK_DISPLAY_VERSION} {PRODUCT_NAME}"},
         {"项目": "生成时间", "内容": now},
         {"项目": "行情数据时间", "内容": market_as_of},
         {"项目": "行情来源统计", "内容": source_summary},
+        {"项目": "行情接口状态摘要", "内容": interface_summary},
         {"项目": "说明", "内容": "本程序只做纪律提醒，不连接券商、不下单、不自动交易。"},
+        {"项目": "量化验证层", "内容": "V2.8.5-Q：主观定方向，量化验信号，纪律控仓位，复盘修正模型"},
+        {"项目": "红利现金流层", "内容": f"已纳入{dividend_stock_count}只红利个股观察；定位为低波现金流层，不替代核心成长收益发动机"},
         {"项目": "双锚综合", "内容": anchor_light},
         {"项目": "情绪温度", "内容": temperature if temperature is not None else "待确认"},
         {"项目": "情绪数据可靠性", "内容": emotion_reliability},
@@ -2031,7 +3033,9 @@ def build_decision_center(
     buy_filter: pd.DataFrame,
     positions_action: pd.DataFrame,
     first_year_summary: dict[str, float],
+    decision_inputs: dict[str, dict[str, str]] | None = None,
 ) -> pd.DataFrame:
+    inputs = decision_inputs or {}
     anchor_row = double_anchor[double_anchor["锚点"] == "综合灯号"]
     anchor_light = anchor_row.iloc[0]["灯号"] if not anchor_row.empty else "待确认"
     anchor_note = anchor_row.iloc[0]["说明"] if not anchor_row.empty else "缺少双锚数据"
@@ -2040,12 +3044,44 @@ def build_decision_center(
     emotion_note = temp_row.iloc[0]["解释"] if not temp_row.empty else "缺少情绪数据"
     emotion_reliability = str(temp_row.iloc[0].get("可靠性", "待确认")) if not temp_row.empty else "待确认"
     actionable = buy_filter[(buy_filter["买点灯号"].isin(["绿", "黄"])) & (buy_filter["一票否决"] == "否")]
+    dividend_stock_count = int((buy_filter.get("资产角色", pd.Series(dtype=object)).astype(str) == "红利现金流个股").sum()) if not buy_filter.empty else 0
     risk_actions = positions_action[positions_action["触发提醒"] == "是"] if not positions_action.empty else positions_action
     quality_missing = int((quality_score["质量状态"] == "数据不足，需人工评分").sum()) if not quality_score.empty else 0
     quality_ready = int(quality_score["质量状态"].isin(["核心候选", "观察候选"]).sum()) if not quality_score.empty else 0
     market_permission = "开放买点复核" if anchor_light == "双绿" and (temperature or 5) <= 3 else "暂停标准新增"
+    mainline_stage = decision_input_text(inputs, "mainline_stage") or "主线聚焦期后段/加速初期（框架默认）"
+    trend_buy_type = decision_input_text(inputs, "trend_buy_type") or "待确认"
+    quant_module_status = decision_input_text(inputs, "quant_module_status") or "V2.8.5-Q启用-需人工复核缺失项"
+    retreat_status = decision_input_text(inputs, "retreat_factor_status") or "待人工复核"
+    stage_ready = 0
+    stage_watch = 0
+    if not buy_filter.empty and "阶段推进结论" in buy_filter.columns:
+        stage_ready = int(buy_filter["阶段推进结论"].isin(["允许下一档", "补足当前阶段", "小额防踏空"]).sum())
+        stage_watch = int((buy_filter["阶段推进结论"] == "等待").sum())
     rows = [
         {"层级": "市场权限", "状态": market_permission, "证据": f"双锚={anchor_light}；情绪温度={temperature}", "动作": anchor_note},
+        {"层级": "主线周期", "状态": mainline_stage, "证据": MAINLINE_CYCLE_STAGES, "动作": "核心持有、回踩加仓、强势不追、过热冷却、退潮复审"},
+        {
+            "层级": "量化验证层",
+            "状态": quant_module_status,
+            "证据": "指数环境、ETF买点、情绪温度、正期望、资产角色分层",
+            "动作": "主观定方向，量化验信号；所有买点先打分，再按仓位纪律执行",
+        },
+        {
+            "层级": "红利现金流层",
+            "状态": f"{dividend_stock_count}只红利个股观察",
+            "证据": "分红连续性、现金流覆盖、股息率安全垫、估值中低位和缩量回踩",
+            "动作": "作为低波现金流层慢建；高息陷阱、举债分红、盈利下滑或只因快分红均否决",
+        },
+        {"层级": "趋势买点", "状态": trend_buy_type, "证据": TREND_BUY_PRIORITY, "动作": "只有主线/质量/情绪/买点/无否决共振时才复核"},
+        {"层级": "阶段推进", "状态": f"{stage_ready}项可复核 / {stage_watch}项等待", "证据": "观察仓→验证仓→核心仓→目标仓；年度缺口不是买入信号", "动作": "达到当前阶段后，必须通过阶段验证才打开下一档"},
+        {"层级": "退潮三因子", "状态": retreat_status, "证据": RETREAT_THREE_FACTORS, "动作": "三因子共振则降低进攻仓位或降级退出"},
+        {
+            "层级": "认知防错层",
+            "状态": "V2.8.5-QM",
+            "证据": "机会成本、全局最优、确认偏误、沉没成本、损失规避、风险概率、能力圈、复利",
+            "动作": "若机会成本/反证/最大损失/能力圈中两项答不清，不买",
+        },
         {"层级": "标准首批", "状态": f"{int((actionable['买点灯号'] == '绿').sum())}只", "证据": "买点通过≥5项、无否决、质量与仓位门槛通过", "动作": "仅在标准首批候选中复核"},
         {"层级": "半额首批", "状态": f"{int((actionable['买点灯号'] == '黄').sum())}只", "证据": "买点通过4项、无否决", "动作": "最多半额首批，且不得跨越剩余额度"},
         {"层级": "质量准入", "状态": f"{quality_ready}只通过 / {quality_missing}只待补", "证据": "部分代理分不折算为完整10分", "动作": "缺少完整评分与证据时禁止新增"},
@@ -2053,7 +3089,7 @@ def build_decision_center(
             "层级": "第一年配置",
             "状态": f"完成{first_year_summary.get('年度完成率', 0):.1%}",
             "证据": f"全资产目标{first_year_summary.get('年度目标占比', 0):.0%}；当前{first_year_summary.get('年度当前全资产占比', 0):.1%}；缺口{first_year_summary.get('年度资金缺口', 0):,.0f}元",
-            "动作": "年度缺口是长期上限，不替代质量、买点和证券账户集中度约束",
+            "动作": "买入/减仓以全资产第一年目标为主；证券账户仓位仅作集中度参考",
         },
         {"层级": "情绪纪律", "状态": f"{temperature}级·{emotion_reliability}" if temperature else "待确认", "证据": emotion_note, "动作": "温度≥4暂停新增；低可靠性不得视为全市场结论"},
         {"层级": "持仓风控", "状态": f"{len(risk_actions)}项触发", "证据": "仓位、专项纪律与退出条件", "动作": "风控 > 清旧 > 补新 > 再平衡"},
@@ -2072,10 +3108,17 @@ def build_execution_plan(
     """把“一个买入方向 + 两个减仓方向”落实成清晰的当日动作预算。"""
     rows: list[dict[str, object]] = []
     annual_lookup = first_year_lookup(first_year)
-    candidates = buy_filter[
-        buy_filter["买点灯号"].isin(["绿", "黄"])
-        & (buy_filter["一票否决"] == "否")
-    ].copy()
+    stage_executable = {"允许下一档", "补足当前阶段", "小额防踏空"}
+    if "阶段推进结论" in buy_filter.columns:
+        candidates = buy_filter[
+            buy_filter["阶段推进结论"].isin(stage_executable)
+            & (buy_filter["一票否决"] == "否")
+        ].copy()
+    else:
+        candidates = buy_filter[
+            buy_filter["买点灯号"].isin(["绿", "黄"])
+            & (buy_filter["一票否决"] == "否")
+        ].copy()
     used_themes: set[str] = set()
     buy_slots = 1
     for _, item in candidates.iterrows():
@@ -2089,9 +3132,29 @@ def build_execution_plan(
                 "标的": f"{item.get('Name')}({item.get('Code')})",
                 "主题": theme,
                 "是否占用额度": "是" if allowed else "否",
-                "动作预算": "最多1个买入方向",
+                "动作预算": f"{item.get('阶段推进结论') or '阶段待确认'}；最多1个买入方向；{item.get('单次仓位上限') or '遵守单次上限'}",
                 "依据": item.get("建议", ""),
+                "趋势结构": item.get("趋势结构"),
+                "单次仓位上限": item.get("单次仓位上限"),
+                "资产角色": item.get("资产角色"),
+                "量化验证状态": item.get("量化验证状态"),
+                "量化买点规则": item.get("量化买点规则"),
+                "正期望检查": item.get("正期望检查"),
+                "量化风控规则": item.get("量化风控规则"),
+                "红利配置角色": item.get("红利配置角色"),
+                "分红质量检查": item.get("分红质量检查"),
+                "红利买点规则": item.get("红利买点规则"),
+                "高息陷阱否决": item.get("高息陷阱否决"),
+                "机会成本检查": item.get("机会成本检查"),
+                "认知防错": item.get("认知防错"),
                 "状态": "可进入复核" if allowed else "顺延",
+                "阶段状态": item.get("阶段状态"),
+                "阶段推进结论": item.get("阶段推进结论"),
+                "阶段验证": item.get("阶段验证"),
+                "阶段占用率": item.get("阶段占用率"),
+                "下一档单次上限": item.get("下一档单次上限"),
+                "阶段阻断原因": item.get("阶段阻断原因"),
+                "阶段动作说明": item.get("阶段动作说明"),
                 "年度配置项": annual.get("配置项"),
                 "年度全资产目标": annual.get("年度目标占比"),
                 "年度资金缺口": annual.get("年度资金缺口"),
@@ -2108,14 +3171,14 @@ def build_execution_plan(
             sell_candidates.append({"Code": item.get("Code"), "Name": item.get("Name"), "说明": item.get("说明", item.get("动作建议", "")), "超额": 999.0})
     if not positions_sheet.empty:
         for _, item in positions_sheet.iterrows():
-            weight = to_float(item.get("Weight"))
-            target = to_float(item.get("Target Weight"))
+            weight = to_float(first_valid(item.get("Full Asset Weight"), item.get("全资产当前仓位")))
+            target = to_float(item.get("年度全资产目标"))
             if weight is not None and target is not None and weight > target:
                 sell_candidates.append(
                     {
                         "Code": item.get("Code"),
                         "Name": item.get("Name"),
-                        "说明": f"证券账户仓位{weight:.2%}，超过目标{target:.2%}",
+                        "说明": f"全资产仓位{weight:.2%}，超过第一年目标{target:.2%}",
                         "超额": weight - target,
                     }
                 )
@@ -2164,7 +3227,7 @@ def build_buy_candidates_view(
     result["市场权限"] = market_permission
 
     def blocker(row: pd.Series) -> str:
-        reason = str(row.get("否决原因", "") or "").strip()
+        reason = clean_blocker_reason(row.get("否决原因", ""))
         signal = str(row.get("买点灯号", "灰"))
         if reason:
             return reason
@@ -2178,18 +3241,81 @@ def build_buy_candidates_view(
 
     result["阻断原因"] = result.apply(blocker, axis=1)
     result["数据状态"] = "有效"
+    range_issues = pd.Series("", index=result.index, dtype=object)
+    range_context_columns = {"High", "Low", "PrevClose", "PrevDayLow", "QuoteTime", "DataSource"}
+    has_range_context = bool(range_context_columns.intersection(result.columns))
+    if has_range_context:
+        range_issues = result.apply(
+            lambda row: buy_range_data_issue(
+                latest=row.get("Latest"),
+                high=row.get("High"),
+                low=row.get("Low"),
+                prev_close=row.get("PrevClose"),
+                prev_day_low=row.get("PrevDayLow"),
+                quote_time=row.get("QuoteTime"),
+                data_source=row.get("DataSource", ""),
+                prev_day_low_source=row.get("PrevDayLowSource", ""),
+            ),
+            axis=1,
+        )
+        result.loc[range_issues.astype(str).str.strip().ne(""), "数据状态"] = "行情未刷新"
+    if "接口状态" in result.columns:
+        interface_status = result["接口状态"].astype(str)
+        result.loc[interface_status.str.contains("未刷新|缺失|失败", regex=True, na=False), "数据状态"] = "行情未刷新"
     if "Latest" in result.columns:
         latest = pd.to_numeric(result["Latest"], errors="coerce")
         result.loc[latest.isna(), "数据状态"] = "行情未刷新"
     if "PctChg" in result.columns:
         pct_chg = pd.to_numeric(result["PctChg"], errors="coerce")
         result.loc[pct_chg.isna(), "数据状态"] = "行情未刷新"
-    if market_permission != "开放买点复核" and "建议买入区间" in result.columns:
-        numeric_range = result["建议买入区间"].astype(str).str.contains(
+    if "建议买入区间" in result.columns:
+        range_text = result["建议买入区间"].astype(str)
+        numeric_range = range_text.str.contains(
             r"\d+(?:\.\d+)?–\d+(?:\.\d+)?",
             regex=True,
         )
-        result.loc[numeric_range, "建议买入区间"] = f"暂不建议买入（市场权限：{market_permission}）"
+        result.loc[range_text.str.contains("行情未刷新|数据不完整", regex=True, na=False), "数据状态"] = "行情未刷新"
+        unsafe_data_range = numeric_range & result["数据状态"].eq("行情未刷新")
+        if unsafe_data_range.any():
+            downgraded_ranges: list[str] = []
+            for issue in range_issues.loc[unsafe_data_range].astype(str).tolist():
+                issue_text = f"：{issue}" if issue else ""
+                downgraded_ranges.append(f"暂不建议买入（行情未刷新或数据不完整{issue_text}）")
+            result.loc[unsafe_data_range, "建议买入区间"] = downgraded_ranges
+            range_text = result["建议买入区间"].astype(str)
+            numeric_range = range_text.str.contains(
+                r"\d+(?:\.\d+)?–\d+(?:\.\d+)?",
+                regex=True,
+            )
+    if market_permission != "开放买点复核" and "建议买入区间" in result.columns:
+        range_text = result["建议买入区间"].astype(str)
+        numeric_range = range_text.str.contains(
+            r"\d+(?:\.\d+)?–\d+(?:\.\d+)?",
+            regex=True,
+        )
+        permission_block = numeric_range & result["买点灯号"].isin(["绿", "黄"])
+        result.loc[permission_block, "建议买入区间"] = f"暂不建议买入（市场权限：{market_permission}）"
+
+    def merge_data_blocker(row: pd.Series) -> str:
+        data_reason = quote_data_blocker_reason(row, range_issues.get(row.name, ""))
+        current_reason = clean_blocker_reason(row.get("阻断原因", ""))
+        if not data_reason:
+            return current_reason or str(row.get("阻断原因", "") or "").strip()
+        if not current_reason:
+            return data_reason
+        if data_reason in current_reason:
+            return current_reason
+        if current_reason in data_reason:
+            return data_reason
+        return f"{data_reason}；{current_reason}"
+
+    result["阻断原因"] = result.apply(merge_data_blocker, axis=1)
+    if market_permission != "开放买点复核" and "阶段推进结论" in result.columns:
+        executable_stage = result["阶段推进结论"].isin(["允许下一档", "补足当前阶段", "小额防踏空"])
+        result.loc[executable_stage, "阶段推进结论"] = "等待"
+        result.loc[executable_stage, "下一档单次上限"] = 0.0
+        result.loc[executable_stage, "阶段阻断原因"] = f"市场权限：{market_permission}"
+        result.loc[executable_stage, "阶段动作说明"] = "等待市场权限恢复后再复核。"
 
     signal_rank = {"绿": 0, "黄": 1, "红": 2, "灰": 3}
     result["_signal_rank"] = result["买点灯号"].map(signal_rank).fillna(4)
@@ -2203,12 +3329,22 @@ def build_buy_candidates_view(
     ).drop(columns=["_signal_rank", "_quality_rank", "_pass_rank", "_room_rank"])
 
     priority_columns = [
-        "买点灯号", "Code", "Name", "建议买入区间", "建议", "阻断原因", "通过项",
-        "质量状态", "市场权限", "当前仓位", "目标仓位", "剩余额度",
-        "年度配置项", "年度资金缺口", "年度完成率", "数据状态",
+        "买点灯号", "Code", "Name", "建议买入区间", "趋势结构", "单次仓位上限", "建议", "阻断原因",
+        "阶段状态", "阶段推进结论", "阶段验证", "阶段占用率", "下一档单次上限", "阶段阻断原因", "阶段动作说明",
+        "资产角色", "量化验证分", "量化验证状态", "量化买点规则", "正期望检查", "量化风控规则",
+        "红利配置角色", "分红质量检查", "红利买点规则", "高息陷阱否决",
+        "机会成本检查", "认知防错", "Latest", "PctChg", "QuoteTime", "DataSource", "接口状态", "失败原因", "重试结果",
+        "质量评分", "质量状态", "评分输入状态", "评分缺失项", "通过项", "市场权限",
+        "仓位决策口径", "全资产当前仓位", "全资产目标仓位", "全资产剩余额度",
+        "证券账户仓位", "年度配置项", "年度资金缺口", "年度完成率", "数据状态",
     ]
+    for column in [
+        "资产角色", "量化验证分", "量化验证状态", "量化买点规则", "正期望检查", "量化风控规则",
+        "红利配置角色", "分红质量检查", "红利买点规则", "高息陷阱否决",
+    ]:
+        if column not in result.columns:
+            result[column] = ""
     ordered = [column for column in priority_columns if column in result.columns]
-    ordered += [column for column in result.columns if column not in ordered]
     return result[ordered].reset_index(drop=True)
 
 
@@ -2226,12 +3362,34 @@ def build_position_risk_view(
     ]
     actions = positions_action[action_columns].copy() if action_columns else pd.DataFrame(columns=["Code"])
     result = base.merge(actions, on="Code", how="left")
+    result["全资产当前仓位"] = [
+        to_float(first_valid(row.get("Full Asset Weight"), row.get("当前仓位")))
+        for _, row in result.iterrows()
+    ]
+    result["全资产目标仓位"] = [
+        to_float(row.get("年度全资产目标"))
+        for _, row in result.iterrows()
+    ]
+    result["全资产剩余额度"] = [
+        max(target - current, 0.0) if current is not None and target is not None else None
+        for current, target in zip(result["全资产当前仓位"], result["全资产目标仓位"])
+    ]
+    result["全资产仓位状态"] = [
+        describe_weight_status(current, target, label="第一年目标")
+        for current, target in zip(result["全资产当前仓位"], result["全资产目标仓位"])
+    ]
+    result["证券账户仓位"] = [to_float(row.get("Weight")) for _, row in result.iterrows()]
+    result["证券账户目标仓位"] = [to_float(row.get("Target Weight")) for _, row in result.iterrows()]
+    result["证券账户仓位状态"] = [
+        describe_weight_status(current, target, label="证券账户目标")
+        for current, target in zip(result["证券账户仓位"], result["证券账户目标仓位"])
+    ]
 
     risk_levels: list[str] = []
     reasons: list[str] = []
     for _, row in result.iterrows():
-        weight = to_float(row.get("Weight"))
-        target = to_float(row.get("Target Weight"))
+        weight = to_float(row.get("全资产当前仓位"))
+        target = to_float(row.get("全资产目标仓位"))
         triggered = str(row.get("触发提醒", "否")) == "是"
         overweight = weight is not None and target is not None and weight > target
         loss = to_float(first_valid(row.get("Unrealized PnL"), row.get("P/L"))) or 0
@@ -2240,7 +3398,7 @@ def build_position_risk_view(
         if triggered and note:
             reason_parts.append(note)
         if overweight:
-            reason_parts.append(f"当前仓位{weight:.2%}高于目标{target:.2%}")
+            reason_parts.append(f"全资产仓位{weight:.2%}高于第一年目标{target:.2%}")
         if loss < 0 and not reason_parts:
             reason_parts.append(f"当前浮亏{loss:,.0f}元")
         if triggered or overweight:
@@ -2258,16 +3416,17 @@ def build_position_risk_view(
     result["动作建议"] = result["动作建议"].fillna(result.get(f"{FRAMEWORK_VERSION} Action", "观察"))
     risk_rank = {"红": 0, "黄": 1, "灰": 2}
     result["_risk_rank"] = result["风险级别"].map(risk_rank).fillna(3)
-    result["_weight_rank"] = pd.to_numeric(result.get("Weight"), errors="coerce").fillna(0)
+    result["_weight_rank"] = pd.to_numeric(result.get("全资产当前仓位"), errors="coerce").fillna(0)
     result = result.sort_values(["_risk_rank", "_weight_rank"], ascending=[True, False], kind="stable")
     result = result.drop(columns=["_risk_rank", "_weight_rank"])
     priority_columns = [
-        "风险级别", "Code", "Name", "动作建议", "触发原因", "Weight", "Target Weight",
+        "风险级别", "Code", "Name", "动作建议", "触发原因",
+        "全资产当前仓位", "全资产目标仓位", "全资产剩余额度", "全资产仓位状态",
+        "证券账户仓位", "证券账户集中度提示",
         "P/L", "P/L%", "Market Value", "Latest", "纪律分类", "触发提醒",
         "年度配置项", "年度资金缺口", "年度完成率",
     ]
     ordered = [column for column in priority_columns if column in result.columns]
-    ordered += [column for column in result.columns if column not in ordered]
     return result[ordered].reset_index(drop=True)
 
 
@@ -2276,7 +3435,7 @@ def build_action_plan_view(
     buy_filter: pd.DataFrame,
     positions_sheet: pd.DataFrame,
 ) -> pd.DataFrame:
-    """给动作计划补充证券账户仓位、目标与剩余额度。"""
+    """给动作计划补充全资产年度主口径与证券账户参考口径。"""
     if execution_plan.empty:
         return execution_plan.copy()
     result = execution_plan.copy()
@@ -2284,32 +3443,79 @@ def build_action_plan_view(
         result["Code"] = result.get("标的", "").astype(str).str.extract(r"\(([^()]+)\)\s*$")[0]
     result["Code"] = result["Code"].map(format_code)
 
-    position_lookup: dict[str, dict[str, float | None]] = {}
+    position_lookup: dict[str, dict[str, object]] = {}
     for _, row in positions_sheet.iterrows():
         code = format_code(row.get("Code"))
-        weight = to_float(first_valid(row.get("Weight"), row.get("当前仓位")))
-        target = to_float(first_valid(row.get("Target Weight"), row.get("目标仓位")))
+        weight = to_float(first_valid(row.get("Full Asset Weight"), row.get("当前仓位")))
+        target = to_float(first_valid(row.get("年度全资产目标"), row.get("目标仓位")))
+        broker_weight = to_float(row.get("Weight"))
+        broker_target = to_float(row.get("Target Weight"))
         position_lookup[code] = {
+            "仓位决策口径": "全资产/第一年配置" if target is not None else "缺少第一年配置映射",
             "当前仓位": weight,
             "目标仓位": target,
             "剩余额度": max(target - weight, 0) if weight is not None and target is not None else None,
+            "全资产当前仓位": weight,
+            "全资产目标仓位": target,
+            "全资产剩余额度": max(target - weight, 0) if weight is not None and target is not None else None,
+            "证券账户仓位": broker_weight,
+            "证券账户目标仓位": broker_target,
         }
     for _, row in buy_filter.iterrows():
         code = format_code(row.get("Code"))
         position_lookup[code] = {
+            "仓位决策口径": row.get("仓位决策口径"),
             "当前仓位": to_float(row.get("当前仓位")),
             "目标仓位": to_float(row.get("目标仓位")),
             "剩余额度": to_float(row.get("剩余额度")),
+            "全资产当前仓位": to_float(row.get("全资产当前仓位")),
+            "全资产目标仓位": to_float(row.get("全资产目标仓位")),
+            "全资产剩余额度": to_float(row.get("全资产剩余额度")),
+            "证券账户仓位": to_float(row.get("证券账户仓位")),
+            "证券账户目标仓位": to_float(row.get("证券账户目标仓位")),
+            "趋势结构": row.get("趋势结构"),
+            "单次仓位上限": row.get("单次仓位上限"),
+            "阶段状态": row.get("阶段状态"),
+            "阶段推进结论": row.get("阶段推进结论"),
+            "阶段验证": row.get("阶段验证"),
+            "阶段占用率": row.get("阶段占用率"),
+            "下一档单次上限": row.get("下一档单次上限"),
+            "阶段阻断原因": row.get("阶段阻断原因"),
+            "阶段动作说明": row.get("阶段动作说明"),
+            "资产角色": row.get("资产角色"),
+            "量化验证状态": row.get("量化验证状态"),
+            "量化买点规则": row.get("量化买点规则"),
+            "正期望检查": row.get("正期望检查"),
+            "量化风控规则": row.get("量化风控规则"),
+            "红利配置角色": row.get("红利配置角色"),
+            "分红质量检查": row.get("分红质量检查"),
+            "红利买点规则": row.get("红利买点规则"),
+            "高息陷阱否决": row.get("高息陷阱否决"),
+            "机会成本检查": row.get("机会成本检查"),
+            "认知防错": row.get("认知防错"),
         }
 
-    for column in ["当前仓位", "目标仓位", "剩余额度"]:
+    for column in [
+        "仓位决策口径", "当前仓位", "目标仓位", "剩余额度",
+        "全资产当前仓位", "全资产目标仓位", "全资产剩余额度",
+        "证券账户仓位", "证券账户目标仓位", "趋势结构", "单次仓位上限",
+        "阶段状态", "阶段推进结论", "阶段验证", "阶段占用率", "下一档单次上限", "阶段阻断原因", "阶段动作说明",
+        "资产角色", "量化验证状态", "量化买点规则", "正期望检查", "量化风控规则",
+        "红利配置角色", "分红质量检查", "红利买点规则", "高息陷阱否决",
+        "机会成本检查", "认知防错",
+    ]:
         result[column] = result["Code"].map(lambda code: position_lookup.get(code, {}).get(column))
     priority_columns = [
         "优先级", "动作类型", "Code", "标的", "状态", "动作预算", "依据",
-        "当前仓位", "目标仓位", "剩余额度", "年度配置项", "年度资金缺口", "年度完成率",
+        "趋势结构", "单次仓位上限", "资产角色", "量化验证状态", "量化买点规则",
+        "阶段状态", "阶段推进结论", "阶段验证", "阶段占用率", "下一档单次上限", "阶段阻断原因", "阶段动作说明",
+        "正期望检查", "量化风控规则", "红利配置角色", "分红质量检查",
+        "红利买点规则", "高息陷阱否决", "机会成本检查", "认知防错",
+        "仓位决策口径", "全资产当前仓位", "全资产目标仓位", "全资产剩余额度",
+        "证券账户仓位", "证券账户目标仓位",
+        "年度配置项", "年度资金缺口", "年度完成率",
     ]
     ordered = [column for column in priority_columns if column in result.columns]
-    ordered += [column for column in result.columns if column not in ordered]
     return result[ordered].sort_values(["优先级", "动作类型"], kind="stable").reset_index(drop=True)
 
 
@@ -2336,17 +3542,21 @@ def build_action_dashboard_view(
         return str(hit.iloc[0].get("内容", fallback)) if not hit.empty else fallback
 
     market_permission = decision_status("市场权限", "待确认")
+    stage_permission = decision_status("阶段推进", "待确认")
     candidate_count = 0
     if not buy_candidates.empty and "买点灯号" in buy_candidates.columns:
-        candidate_count = int(buy_candidates["买点灯号"].isin(["绿", "黄"]).sum())
+        if "阶段推进结论" in buy_candidates.columns:
+            candidate_count = int(buy_candidates["阶段推进结论"].isin(["允许下一档", "补足当前阶段", "小额防踏空"]).sum())
+        else:
+            candidate_count = int(buy_candidates["买点灯号"].isin(["绿", "黄"]).sum())
         if market_permission != "开放买点复核":
             candidate_count = 0
     risk_count = int((position_risk.get("风险级别") == "红").sum()) if "风险级别" in position_risk.columns else 0
     cash_status = dashboard_value("现金安全垫状态", "待确认")
     core_statuses = [
         ("市场权限", market_permission, "双锚、情绪和数据共同决定"),
-        ("买入候选", f"{candidate_count}只", "仅统计当前市场权限下可复核标的"),
-        ("减仓复核", f"{risk_count}项", "触发纪律或证券账户超配"),
+        ("阶段推进", stage_permission if stage_permission != "待确认" else f"{candidate_count}只", "只统计阶段结论允许复核的标的"),
+        ("减仓复核", f"{risk_count}项", "触发专项纪律或全资产第一年超配"),
         ("现金安全垫", cash_status, "全资产与证券账户双口径"),
     ]
     for item, status, evidence in core_statuses:
@@ -2379,17 +3589,205 @@ def build_action_dashboard_view(
             )
 
     quote_time = dashboard_value("行情数据时间", "未取到当日接口时间")
-    data_status = "行情未刷新" if any(key in quote_time for key in ("未取到", "未刷新", "缺失")) else "行情已刷新"
+    interface_summary = dashboard_value("行情接口状态摘要", "未生成接口诊断")
+    if any(key in quote_time for key in ("未取到", "未刷新", "缺失")):
+        data_status = "行情未刷新"
+    elif any(key in interface_summary for key in ("未刷新", "缺失", "失败")):
+        data_status = "行情字段不完整"
+    else:
+        data_status = "行情已刷新"
     rows.append(
         {
             "区域": "数据状态",
             "项目": "行情时间",
             "状态": data_status,
-            "证据": quote_time,
-            "动作": "未刷新时禁止新增" if data_status == "行情未刷新" else "按纪律复核",
+            "证据": f"{quote_time}；{interface_summary}",
+            "动作": "未刷新或字段不完整时禁止新增" if data_status != "行情已刷新" else "按纪律复核",
         }
     )
     return pd.DataFrame(rows, columns=["区域", "项目", "状态", "证据", "动作"])
+
+
+def build_buy_point_plan_view(
+    buy_point_plan: pd.DataFrame,
+    positions_sheet: pd.DataFrame,
+    buy_filter: pd.DataFrame | None = None,
+) -> pd.DataFrame:
+    """把人工买点计划与当前持仓上下文合并成前台可读表。"""
+    columns = [
+        "Code", "Name", "买点灯号", "资产角色", "当前价", "持仓市值", "成本", "当前盈亏",
+        "轻仓观察区间", "标准买点区间", "强买点区间", "不买/暂停区",
+        "下一笔合理金额", "成立条件", "风险暂停条件", "来源日期",
+    ]
+    if buy_point_plan is None or buy_point_plan.empty:
+        return pd.DataFrame(columns=columns)
+
+    position_lookup = {}
+    if positions_sheet is not None and not positions_sheet.empty:
+        position_lookup = positions_sheet.set_index("Code").to_dict("index")
+    buy_filter_lookup = {}
+    if buy_filter is not None and not buy_filter.empty:
+        buy_filter_lookup = buy_filter.set_index("Code").to_dict("index")
+
+    rows: list[dict[str, object]] = []
+    for _, item in buy_point_plan.iterrows():
+        code = format_code(item.get("Code"))
+        position = position_lookup.get(code, {})
+        filter_row = buy_filter_lookup.get(code, {})
+        current_price = first_valid(
+            to_float(position.get("Latest")),
+            to_float(item.get("当前价参考")),
+        )
+        rows.append(
+            {
+                "Code": code,
+                "Name": first_valid_text(position.get("Name"), item.get("Name")),
+                "买点灯号": filter_row.get("买点灯号"),
+                "资产角色": item.get("资产角色"),
+                "当前价": current_price,
+                "持仓市值": to_float(position.get("Market Value")),
+                "成本": to_float(position.get("Cost")),
+                "当前盈亏": to_float(position.get("P/L%")),
+                "轻仓观察区间": item.get("轻仓观察区间"),
+                "标准买点区间": item.get("标准买点区间"),
+                "强买点区间": item.get("强买点区间"),
+                "不买/暂停区": item.get("不买/暂停区"),
+                "下一笔合理金额": item.get("下一笔合理金额"),
+                "成立条件": item.get("成立条件"),
+                "风险暂停条件": item.get("风险暂停条件"),
+                "来源日期": item.get("来源日期"),
+            }
+        )
+    result = pd.DataFrame(rows, columns=columns)
+    result["_has_position"] = result["持仓市值"].notna().astype(int)
+    result["_value_rank"] = pd.to_numeric(result["持仓市值"], errors="coerce").fillna(-1)
+    result = result.sort_values(["_has_position", "_value_rank", "Code"], ascending=[False, False, True], kind="stable")
+    return result.drop(columns=["_has_position", "_value_rank"]).reset_index(drop=True)
+
+
+def is_long_term_tracking_row(row) -> bool:
+    """识别观察池中的长期跟踪个股。"""
+    text = " ".join(
+        str(row.get(column, "") or "")
+        for column in ["Role", "Action", "Notes", "Thesis"]
+    )
+    asset_type = str(row.get("Asset Type", "") or "").strip().lower()
+    return asset_type == "stock" and ("长期跟踪" in text or "个股观察" in text)
+
+
+def build_long_term_tracking_view(
+    watchlist: pd.DataFrame,
+    market_data: pd.DataFrame,
+    quality_score: pd.DataFrame,
+    buy_filter: pd.DataFrame,
+    first_year: pd.DataFrame,
+) -> pd.DataFrame:
+    """专门汇总长期跟踪个股，避免在超宽买入候选页里查找。"""
+    market_lookup = market_data.set_index("Code").to_dict("index") if not market_data.empty else {}
+    quality_lookup = quality_score.set_index("Code").to_dict("index") if not quality_score.empty else {}
+    buy_lookup = buy_filter.set_index("Code").to_dict("index") if not buy_filter.empty else {}
+    year_lookup = first_year_lookup(first_year)
+    rows: list[dict[str, object]] = []
+
+    for _, item in watchlist.iterrows():
+        if not is_long_term_tracking_row(item):
+            continue
+        code = format_code(item.get("Code"))
+        market = market_lookup.get(code, {})
+        quality = quality_lookup.get(code, {})
+        buy = buy_lookup.get(code, {})
+        year = year_lookup.get(code, {})
+        quality_status = str(quality.get("质量状态", "待确认"))
+        quality_input_status = str(quality.get("评分输入状态", "待确认"))
+        quality_missing_items = str(quality.get("评分缺失项", "未生成质量评分诊断"))
+        blocker = clean_blocker_reason(buy.get("阻断原因", "")) or clean_blocker_reason(buy.get("否决原因", ""))
+        interface_status = str(market.get("接口状态", "行情未刷新"))
+        data_blocker = quote_data_blocker_reason(market)
+        if data_blocker:
+            if blocker and data_blocker not in blocker:
+                blocker = f"{data_blocker}；{blocker}"
+            else:
+                blocker = data_blocker
+        next_steps: list[str] = []
+        if "未刷新" in interface_status or "失败" in interface_status or "缺失" in interface_status:
+            next_steps.append("联网重跑行情接口")
+        if "数据不足" in quality_status:
+            next_steps.append("补完整质量评分、估值/筹码、龙头同步和次日验证")
+        elif blocker:
+            next_steps.append("先处理阻断原因，再进入人工复核")
+        if not next_steps:
+            next_steps.append("仅限人工复核，不自动交易")
+        rows.append(
+            {
+                "Code": code,
+                "Name": first_valid(market.get("Name"), item.get("Name")),
+                "跟踪分组": item.get("Role"),
+                "Theme": item.get("Theme"),
+                "Latest": market.get("Latest"),
+                "PctChg": market.get("PctChg"),
+                "Open": market.get("Open"),
+                "High": market.get("High"),
+                "Low": market.get("Low"),
+                "PrevClose": market.get("PrevClose"),
+                "Amount": market.get("Amount"),
+                "QuoteTime": market.get("QuoteTime"),
+                "DataSource": market.get("DataSource"),
+                "接口状态": market.get("接口状态"),
+                "失败原因": market.get("失败原因"),
+                "重试结果": market.get("重试结果"),
+                "质量状态": quality_status,
+                "质量评分": quality.get("折算质量分"),
+                "评分输入状态": quality_input_status,
+                "评分缺失项": quality_missing_items,
+                "买点灯号": buy.get("买点灯号"),
+                "阻断原因": blocker or "无",
+                "建议买入区间": buy.get("建议买入区间"),
+                "趋势结构": buy.get("趋势结构"),
+                "单次仓位上限": buy.get("单次仓位上限"),
+                "资产角色": buy.get("资产角色"),
+                "量化验证状态": buy.get("量化验证状态"),
+                "量化买点规则": buy.get("量化买点规则"),
+                "正期望检查": buy.get("正期望检查"),
+                "量化风控规则": buy.get("量化风控规则"),
+                "红利配置角色": buy.get("红利配置角色"),
+                "分红质量检查": buy.get("分红质量检查"),
+                "红利买点规则": buy.get("红利买点规则"),
+                "高息陷阱否决": buy.get("高息陷阱否决"),
+                "机会成本检查": buy.get("机会成本检查"),
+                "反向失败路径": buy.get("反向失败路径"),
+                "建议": buy.get("建议"),
+                "仓位决策口径": buy.get("仓位决策口径"),
+                "全资产当前仓位": buy.get("全资产当前仓位"),
+                "全资产目标仓位": buy.get("全资产目标仓位"),
+                "全资产剩余额度": buy.get("全资产剩余额度"),
+                "证券账户仓位": buy.get("证券账户仓位"),
+                "证券账户目标仓位": buy.get("证券账户目标仓位"),
+                "年度配置项": year.get("配置项"),
+                "年度资金缺口": year.get("年度资金缺口"),
+                "年度完成率": year.get("年度完成率"),
+                "Thesis": item.get("Thesis"),
+                "Invalidation": item.get("Invalidation"),
+                "下一步": "；".join(next_steps),
+            }
+        )
+
+    return pd.DataFrame(
+        rows,
+        columns=[
+            "Code", "Name", "跟踪分组", "Theme",
+            "Latest", "PctChg", "Open", "High", "Low", "PrevClose", "Amount", "QuoteTime", "DataSource",
+            "接口状态", "失败原因", "重试结果",
+            "质量状态", "质量评分", "评分输入状态", "评分缺失项", "买点灯号",
+            "阻断原因", "建议买入区间", "趋势结构", "单次仓位上限",
+            "资产角色", "量化验证状态", "量化买点规则", "正期望检查", "量化风控规则",
+            "红利配置角色", "分红质量检查", "红利买点规则", "高息陷阱否决",
+            "机会成本检查", "反向失败路径", "建议",
+            "仓位决策口径", "全资产当前仓位", "全资产目标仓位", "全资产剩余额度",
+            "证券账户仓位",
+            "年度配置项", "年度资金缺口", "年度完成率",
+            "Thesis", "Invalidation", "下一步",
+        ],
+    )
 
 
 def build_output_sheet_order(sheets: dict[str, pd.DataFrame]) -> list[str]:
@@ -2432,10 +3830,47 @@ def style_excel_worksheet(ws, sheet_name: str) -> None:
         "质量状态": 22,
         "情绪温度": 11,
         "反馈状态": 12,
+        "趋势结构": 34,
+        "关键支撑纪律": 42,
+        "单次仓位上限": 32,
+        "爆量/量质吸纪律": 42,
+        "机会成本检查": 42,
+        "认知防错": 44,
+        "决策树情景": 42,
+        "赔率/最大损失": 36,
+        "反向失败路径": 42,
+        "能力圈边界": 34,
+        "资产角色": 18,
+        "量化验证分": 12,
+        "量化验证状态": 16,
+        "量化买点规则": 48,
+        "正期望检查": 46,
+        "量化风控规则": 46,
+        "红利配置角色": 18,
+        "分红质量检查": 48,
+        "红利买点规则": 48,
+        "高息陷阱否决": 52,
         "当前仓位": 12,
         "目标仓位": 12,
         "剩余额度": 12,
         "仓位状态": 22,
+        "阶段状态": 14,
+        "阶段目标下限": 14,
+        "阶段目标上限": 14,
+        "阶段占用率": 14,
+        "阶段验证": 11,
+        "阶段推进结论": 16,
+        "下一档单次上限": 16,
+        "阶段阻断原因": 42,
+        "阶段动作说明": 42,
+        "仓位决策口径": 20,
+        "全资产当前仓位": 16,
+        "全资产目标仓位": 16,
+        "全资产剩余额度": 16,
+        "全资产仓位状态": 24,
+        "证券账户目标仓位": 17,
+        "证券账户仓位状态": 24,
+        "证券账户集中度提示": 42,
         "Latest": 11,
         "PctChg": 10,
         "Open": 10,
@@ -2486,6 +3921,10 @@ def style_excel_worksheet(ws, sheet_name: str) -> None:
         "年度配置状态": 18,
         "进度状态": 18,
         "执行约束": 46,
+        "跟踪分组": 22,
+        "Thesis": 44,
+        "Invalidation": 44,
+        "下一步": 36,
         "Section": 14,
         "Key": 28,
         "Value": 42,
@@ -2499,6 +3938,19 @@ def style_excel_worksheet(ws, sheet_name: str) -> None:
         "FreshnessRule": 56,
         "FailureBehavior": 56,
         "ConfigFile": 26,
+        "当前价": 11,
+        "持仓市值": 14,
+        "成本": 11,
+        "当前盈亏": 12,
+        "当前价参考": 12,
+        "轻仓观察区间": 18,
+        "标准买点区间": 18,
+        "强买点区间": 18,
+        "不买/暂停区": 28,
+        "下一笔合理金额": 24,
+        "成立条件": 58,
+        "风险暂停条件": 52,
+        "来源日期": 14,
     }
 
     for col_idx in range(1, ws.max_column + 1):
@@ -2512,7 +3964,14 @@ def style_excel_worksheet(ws, sheet_name: str) -> None:
     if sheet_name in ("Buy_Filter", "03_买入候选"):
         for row in range(2, ws.max_row + 1):
             ws.row_dimensions[row].height = 38
-        for col_name in ["建议买入区间", "通过明细", "未通过项", "待确认项", "否决原因", "建议"]:
+        for col_name in [
+            "建议买入区间", "趋势结构", "关键支撑纪律", "单次仓位上限", "爆量/量质吸纪律",
+            "阶段阻断原因", "阶段动作说明",
+            "机会成本检查", "认知防错", "决策树情景", "赔率/最大损失", "反向失败路径", "能力圈边界",
+            "量化买点规则", "正期望检查", "量化风控规则",
+            "分红质量检查", "红利买点规则", "高息陷阱否决",
+            "通过明细", "未通过项", "待确认项", "否决原因", "建议",
+        ]:
             col_idx = headers.get(col_name)
             if col_idx:
                 for row in range(2, ws.max_row + 1):
@@ -2544,11 +4003,109 @@ def style_excel_worksheet(ws, sheet_name: str) -> None:
                 elif str(cell.value) == "否":
                     cell.fill = neutral_fill
 
+        quant_col = headers.get("量化验证状态")
+        if quant_col:
+            for row in range(2, ws.max_row + 1):
+                cell = ws.cell(row=row, column=quant_col)
+                text = str(cell.value or "")
+                if "标准" in text:
+                    cell.fill = good_fill
+                elif "观察" in text:
+                    cell.fill = watch_fill
+                elif "阻断" in text or "风险" in text:
+                    cell.fill = bad_fill
+                else:
+                    cell.fill = grey_fill
+                cell.font = Font(bold=True)
+                cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+
+        stage_col = headers.get("阶段推进结论")
+        if stage_col:
+            for row in range(2, ws.max_row + 1):
+                cell = ws.cell(row=row, column=stage_col)
+                text = str(cell.value or "")
+                if "允许" in text or "补足" in text:
+                    cell.fill = good_fill
+                elif "防踏空" in text or "等待" in text:
+                    cell.fill = watch_fill
+                elif "暂停" in text or "降级" in text:
+                    cell.fill = bad_fill
+                else:
+                    cell.fill = grey_fill
+                cell.font = Font(bold=True)
+                cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+
     if sheet_name in ("Investment_Profile", "Data_Sources"):
         for row in range(2, ws.max_row + 1):
             ws.row_dimensions[row].height = 44
 
-    if sheet_name in ("Buy_Filter", "Positions_Action", "03_买入候选", "04_持仓风险"):
+    if sheet_name in ("买点计划", "Buy_Point_Plan_Source"):
+        for row in range(2, ws.max_row + 1):
+            ws.row_dimensions[row].height = 56
+        lamp_col = headers.get("买点灯号")
+        if lamp_col:
+            for row in range(2, ws.max_row + 1):
+                cell = ws.cell(row=row, column=lamp_col)
+                text = str(cell.value or "")
+                if "绿" in text:
+                    cell.fill = good_fill
+                elif "黄" in text:
+                    cell.fill = watch_fill
+                elif "红" in text:
+                    cell.fill = bad_fill
+                else:
+                    cell.fill = grey_fill
+                cell.font = Font(bold=True)
+                cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        for col_name in ["成立条件", "风险暂停条件", "不买/暂停区", "下一笔合理金额"]:
+            col_idx = headers.get(col_name)
+            if col_idx:
+                for row in range(2, ws.max_row + 1):
+                    ws.cell(row=row, column=col_idx).alignment = Alignment(vertical="center", wrap_text=True)
+
+    if sheet_name == "长期跟踪个股":
+        for row in range(2, ws.max_row + 1):
+            ws.row_dimensions[row].height = 42
+        lamp_col = headers.get("买点灯号")
+        if lamp_col:
+            for row in range(2, ws.max_row + 1):
+                cell = ws.cell(row=row, column=lamp_col)
+                text = str(cell.value or "")
+                if "绿" in text:
+                    cell.fill = good_fill
+                elif "黄" in text:
+                    cell.fill = watch_fill
+                elif "红" in text:
+                    cell.fill = bad_fill
+                else:
+                    cell.fill = grey_fill
+
+    if sheet_name == "04_阶段推进":
+        ws.freeze_panes = "A2"
+        for row in range(2, ws.max_row + 1):
+            ws.row_dimensions[row].height = 42
+        stage_col = headers.get("阶段推进结论")
+        if stage_col:
+            for row in range(2, ws.max_row + 1):
+                cell = ws.cell(row=row, column=stage_col)
+                text = str(cell.value or "")
+                if "允许" in text or "补足" in text:
+                    cell.fill = good_fill
+                elif "防踏空" in text or "等待" in text:
+                    cell.fill = watch_fill
+                elif "暂停" in text or "降级" in text:
+                    cell.fill = bad_fill
+                else:
+                    cell.fill = grey_fill
+                cell.font = Font(bold=True)
+                cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        for col_name in ["阶段阻断原因", "阶段动作说明"]:
+            col_idx = headers.get(col_name)
+            if col_idx:
+                for row in range(2, ws.max_row + 1):
+                    ws.cell(row, col_idx).alignment = Alignment(vertical="center", wrap_text=True)
+
+    if sheet_name in ("Buy_Filter", "Positions_Action", "03_买入候选", "04_阶段推进", "05_持仓风险"):
         for row in range(2, ws.max_row + 1):
             if row % 2 == 0:
                 for col_idx in range(1, ws.max_column + 1):
@@ -2565,7 +4122,7 @@ def style_excel_worksheet(ws, sheet_name: str) -> None:
                 for row in range(2, ws.max_row + 1):
                     ws.cell(row, col_idx).alignment = Alignment(vertical="center", wrap_text=True)
 
-    if sheet_name == "04_持仓风险" and headers.get("风险级别"):
+    if sheet_name == "05_持仓风险" and headers.get("风险级别"):
         risk_col = headers["风险级别"]
         for row in range(2, ws.max_row + 1):
             cell = ws.cell(row, risk_col)
@@ -2616,11 +4173,20 @@ def style_excel_worksheet(ws, sheet_name: str) -> None:
         "当前仓位": "0.00%",
         "目标仓位": "0.00%",
         "剩余额度": "0.00%",
+        "阶段目标下限": "0.00%",
+        "阶段目标上限": "0.00%",
+        "阶段占用率": "0.00%",
+        "下一档单次上限": "0.00%",
+        "全资产当前仓位": "0.00%",
+        "全资产目标仓位": "0.00%",
+        "全资产剩余额度": "0.00%",
         "量能倍数": "0.00",
         "质量评分": "0.0",
         "折算质量分": "0.0",
+        "量化验证分": "0.0",
         "数据完整度": "0%",
         "证券账户仓位": "0.00%",
+        "证券账户目标仓位": "0.00%",
         "全资产穿透仓位": "0.00%",
         "主题上限": "0.00%",
         "上限剩余额度": "0.00%",
@@ -2672,7 +4238,7 @@ def style_action_dashboard(ws, frame: pd.DataFrame) -> None:
         ws.column_dimensions[column].width = width
 
     ws.merge_cells("A1:H1")
-    ws["A1"] = "V2.8.5 今日行动决策中心"
+    ws["A1"] = f"{FRAMEWORK_DISPLAY_VERSION} 今日行动决策中心"
     ws["A1"].fill = PatternFill("solid", fgColor="1F4E78")
     ws["A1"].font = Font(color="FFFFFF", bold=True, size=18)
     ws["A1"].alignment = Alignment(horizontal="left", vertical="center")
@@ -2763,25 +4329,37 @@ def style_action_dashboard(ws, frame: pd.DataFrame) -> None:
 
 
 def add_dashboard_chart(wb: Workbook) -> None:
-    """Add one decision-useful native Excel chart: current versus target weights."""
-    dashboard_name = "06_组合总览" if "06_组合总览" in wb.sheetnames else "Dashboard"
+    """Add one decision-useful native Excel chart: full-asset current versus first-year target."""
+    dashboard_name = "07_组合总览" if "07_组合总览" in wb.sheetnames else "06_组合总览" if "06_组合总览" in wb.sheetnames else "Dashboard"
     if dashboard_name not in wb.sheetnames or "Positions" not in wb.sheetnames:
         return
     dashboard = wb[dashboard_name]
     positions = wb["Positions"]
     headers = {cell.value: cell.column for cell in positions[1]}
-    if not {"Name", "Weight", "Target Weight"}.issubset(headers):
+    if {"Name", "Full Asset Weight", "年度全资产目标"}.issubset(headers):
+        current_column = "Full Asset Weight"
+        target_column = "年度全资产目标"
+        chart_title = "全资产当前仓位 vs 第一年目标"
+        x_axis_title = "全资产权重"
+        series_labels = ("全资产当前", "第一年目标")
+    elif {"Name", "Weight", "Target Weight"}.issubset(headers):
+        current_column = "Weight"
+        target_column = "Target Weight"
+        chart_title = "证券账户仓位 vs 目标仓位"
+        x_axis_title = "证券账户权重"
+        series_labels = ("证券账户当前", "证券账户目标")
+    else:
         return
     chart = BarChart()
     chart.type = "bar"
     chart.style = 10
-    chart.title = "当前仓位 vs 目标仓位"
+    chart.title = chart_title
     chart.y_axis.title = "标的"
-    chart.x_axis.title = "证券账户权重"
+    chart.x_axis.title = x_axis_title
     chart.height = 8.2
     chart.width = 16.5
     categories = Reference(positions, min_col=headers["Name"], min_row=2, max_row=positions.max_row)
-    for column_name in ("Weight", "Target Weight"):
+    for column_name in (current_column, target_column):
         data = Reference(
             positions,
             min_col=headers[column_name],
@@ -2791,8 +4369,8 @@ def add_dashboard_chart(wb: Workbook) -> None:
         )
         chart.add_data(data, titles_from_data=True, from_rows=False)
     if len(chart.series) >= 2:
-        chart.series[0].tx = SeriesLabel(v="当前仓位")
-        chart.series[1].tx = SeriesLabel(v="目标仓位")
+        chart.series[0].tx = SeriesLabel(v=series_labels[0])
+        chart.series[1].tx = SeriesLabel(v=series_labels[1])
     chart.set_categories(categories)
     chart.legend.position = "b"
     chart.dLbls = DataLabelList()
@@ -2802,8 +4380,8 @@ def add_dashboard_chart(wb: Workbook) -> None:
 
 def add_first_year_chart(wb: Workbook) -> None:
     """在Dashboard加入第一年动态目标金额与当前金额对比。"""
-    dashboard_name = "06_组合总览" if "06_组合总览" in wb.sheetnames else "Dashboard"
-    allocation_name = "05_年度配置" if "05_年度配置" in wb.sheetnames else "FirstYear_Allocation"
+    dashboard_name = "07_组合总览" if "07_组合总览" in wb.sheetnames else "06_组合总览" if "06_组合总览" in wb.sheetnames else "Dashboard"
+    allocation_name = "06_年度配置" if "06_年度配置" in wb.sheetnames else "05_年度配置" if "05_年度配置" in wb.sheetnames else "FirstYear_Allocation"
     if dashboard_name not in wb.sheetnames or allocation_name not in wb.sheetnames:
         return
     dashboard = wb[dashboard_name]
@@ -2866,7 +4444,7 @@ def write_excel(output_path: Path, sheets: dict[str, pd.DataFrame]) -> None:
 
     add_dashboard_chart(wb)
     add_first_year_chart(wb)
-    dashboard_name = "06_组合总览" if "06_组合总览" in wb.sheetnames else "Dashboard"
+    dashboard_name = "07_组合总览" if "07_组合总览" in wb.sheetnames else "06_组合总览" if "06_组合总览" in wb.sheetnames else "Dashboard"
     if dashboard_name in wb.sheetnames:
         ws = wb[dashboard_name]
         percentage_labels = {
@@ -2948,19 +4526,51 @@ def format_buy_range_recommendation(
     hard_block_kind: str,
     hard_block_reason: str,
     veto_reason: str,
+    prev_day_low_source: str = "",
     now: datetime | None = None,
 ) -> str:
     """把可复算价格区间转换为带权限语义的候选表文本。"""
     current = now or datetime.now()
-    live_sources = {"行情接口", "东方财富补齐", "腾讯行情补齐"}
-    source = str(data_source or "").strip()
-    if source not in live_sources or not is_recent_complete_quote(quote_time, current):
-        return "暂不建议买入（行情未刷新或数据不完整）"
+
+    def reference_range_text(label: str = "观察区间") -> str:
+        reference_range = calculate_reference_buy_range(
+            code=code,
+            name=name,
+            latest=latest,
+            high=high,
+            low=low,
+            prev_close=prev_close,
+            prev_day_low=prev_day_low,
+        )
+        if reference_range is None:
+            return ""
+        return f"{label} {format_price_range(reference_range, code, name)}"
+
+    def blocked_with_reference(reason: str, label: str = "观察区间") -> str:
+        range_text = reference_range_text(label)
+        return f"暂不建议买入（{reason}）" + (f"；{range_text}" if range_text else "")
+
+    def blocked_without_range(reason: str) -> str:
+        return f"暂不建议买入（{reason}）"
+
+    data_issue = buy_range_data_issue(
+        latest=latest,
+        high=high,
+        low=low,
+        prev_close=prev_close,
+        prev_day_low=prev_day_low,
+        quote_time=quote_time,
+        data_source=data_source,
+        prev_day_low_source=prev_day_low_source,
+        now=current,
+    )
+    if data_issue:
+        return blocked_without_range(f"行情未刷新或数据不完整：{data_issue}")
 
     if str(veto_reason or "").strip() not in {"", "无"}:
-        return f"暂不建议买入（{veto_reason}）"
+        return blocked_without_range(str(veto_reason).strip())
     if hard_block_kind and hard_block_kind != "position_full":
-        return f"暂不建议买入（{hard_block_reason or '存在硬性阻断'}）"
+        return blocked_without_range(hard_block_reason or "存在硬性阻断")
 
     range_signal = technical_signal
     if hard_block_kind == "position_full" and range_signal not in {"绿", "黄"}:
@@ -2976,12 +4586,12 @@ def format_buy_range_recommendation(
         prev_day_low=prev_day_low,
     )
     if price_range is None:
-        return "暂不建议买入（等待重新站稳昨日低点）"
+        prev_low_text = format_price_value(prev_day_low, code, name)
+        if prev_low_text and to_float(latest) is not None and to_float(prev_day_low) is not None and to_float(latest) < to_float(prev_day_low):
+            return f"暂不建议买入（等待重新站稳昨日低点 {prev_low_text}）"
+        return blocked_without_range("买点过滤器未通过")
 
-    tick = price_tick(code, name)
-    decimals = 3 if tick == 0.001 else 2
-    lower, upper = price_range
-    range_text = f"{lower:.{decimals}f}–{upper:.{decimals}f}"
+    range_text = format_price_range(price_range, code, name)
     quote_dt = pd.to_datetime(quote_time).to_pydatetime()
     is_next_session_reference = quote_dt.date() < current.date()
     if hard_block_kind == "position_full":
@@ -2993,7 +4603,7 @@ def format_buy_range_recommendation(
     if technical_signal == "黄":
         label = "下一交易日半额复核区间" if is_next_session_reference else "半额复核区间"
         return f"{label} {range_text}"
-    return "暂不建议买入（买点过滤器未通过）"
+    return blocked_without_range("买点过滤器未通过")
 
 
 def build_buy_filter(
@@ -3002,37 +4612,69 @@ def build_buy_filter(
     positions: pd.DataFrame | None = None,
     quality_score: pd.DataFrame | None = None,
     emotion: pd.DataFrame | None = None,
+    first_year: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
-    """V2.8.5 buy filter with quality, emotion, position and role constraints."""
+    """V2.8.5 buy filter with quality, emotion, full-asset position and role constraints."""
     market_by_code = market_data.set_index("Code")
     quality_by_code = quality_score.set_index("Code") if quality_score is not None and not quality_score.empty else None
+    annual_lookup = first_year_lookup(first_year) if first_year is not None else {}
     emotion_temperature = 1
     if emotion is not None and not emotion.empty:
         temperature_row = emotion[emotion["指标"] == "情绪温度"]
         if not temperature_row.empty:
             emotion_temperature = int(to_float(temperature_row.iloc[0]["数值"]) or 1)
-    position_weight_by_code: dict[str, float] = {}
-    if positions is not None and not positions.empty and "Weight" in positions.columns:
+    broker_weight_by_code: dict[str, float] = {}
+    broker_target_by_code: dict[str, float] = {}
+    if positions is not None and not positions.empty:
         for _, position in positions.iterrows():
+            code = format_code(position.get("Code"))
             weight = to_float(position.get("Weight"))
             if weight is not None:
-                position_weight_by_code[format_code(position.get("Code"))] = weight
+                broker_weight_by_code[code] = weight
+            target = to_float(position.get("Target Weight"))
+            if target is not None:
+                broker_target_by_code[code] = target
     rows: list[dict] = []
 
     for _, item in watchlist.iterrows():
-        code = str(item["Code"]).strip()
+        code = format_code(item["Code"])
         role = item.get("Role", "")
+        theme = item.get("Theme", "")
+        asset_type = item.get("Asset Type", "")
         notes = str(item.get("Notes", "") or "").strip()
+        volume_profile = volume_structure_profile(code, item.get("Name", ""), role, theme, asset_type, notes)
+        cognitive_profile = cognitive_guardrail_profile(code, item.get("Name", ""), role, theme, asset_type, notes)
+        quant_role = quant_role_profile(code, item.get("Name", ""), role, theme, asset_type, notes)
+        dividend_profile = dividend_stock_profile(code, item.get("Name", ""), role, theme, asset_type, notes)
         quote = market_by_code.loc[code] if code in market_by_code.index else None
         quality_row = quality_by_code.loc[code] if quality_by_code is not None and code in quality_by_code.index else None
         quality_value = to_float(quality_row.get("折算质量分")) if quality_row is not None else None
         quality_status = str(quality_row.get("质量状态", "待确认")) if quality_row is not None else "待确认"
+        quality_input_status = str(quality_row.get("评分输入状态", "待确认")) if quality_row is not None else "待确认"
+        quality_missing_items = str(quality_row.get("评分缺失项", "未生成质量评分诊断")) if quality_row is not None else "未生成质量评分诊断"
 
-        target_weight = to_float(item.get("Target Weight"))
-        current_weight = first_valid(
-            position_weight_by_code.get(code),
+        broker_target_weight = first_valid(to_float(item.get("Target Weight")), broker_target_by_code.get(code))
+        broker_current_weight = first_valid(
+            broker_weight_by_code.get(code),
             to_float(item.get("Current Weight")),
         )
+        broker_position_status = describe_weight_status(
+            to_float(broker_current_weight),
+            to_float(broker_target_weight),
+            label="证券账户目标",
+        )
+
+        annual = annual_lookup.get(code, {})
+        annual_target_weight = to_float(annual.get("年度目标占比"))
+        annual_current_weight = to_float(annual.get("当前全资产占比"))
+        has_annual_mapping = bool(annual)
+        target_weight = annual_target_weight
+        current_weight = annual_current_weight
+        decision_basis = "全资产/第一年配置"
+        if is_index_code(code):
+            decision_basis = "指数锚点，不适用"
+        elif not has_annual_mapping:
+            decision_basis = "缺少第一年配置映射"
         if current_weight is None and target_weight is not None and not is_index_code(code):
             current_weight = 0.0
         remaining_weight = None
@@ -3046,18 +4688,15 @@ def build_buy_filter(
             hard_block_kind = "index"
             hard_block_reason = "指数仅作市场锚点，不执行买入"
         elif target_weight is None:
-            position_status = "未设置目标仓位"
+            position_status = "未映射第一年全资产目标"
+            hard_block_kind = "missing_annual_target"
+            hard_block_reason = "缺少第一年配置目标，禁止按证券账户口径替代买入额度"
         elif current_weight is None:
             position_status = "当前仓位缺失，需人工确认"
             hard_block_kind = "missing_weight"
-            hard_block_reason = "当前仓位缺失，禁止自动给出买入建议"
-        elif current_weight > target_weight:
-            excess = current_weight - target_weight
-            position_status = f"超目标 {excess:.2%}"
-        elif current_weight == target_weight:
-            position_status = "已达目标仓位"
+            hard_block_reason = "全资产仓位缺失，禁止自动给出买入建议"
         else:
-            position_status = f"低于目标，剩余 {remaining_weight:.2%}"
+            position_status = describe_weight_status(current_weight, target_weight, label="第一年目标")
 
         if not hard_block_kind and "遗留仓" in str(role):
             hard_block_kind = "legacy"
@@ -3072,7 +4711,7 @@ def build_buy_filter(
             and current_weight >= target_weight
         ):
             hard_block_kind = "position_full"
-            hard_block_reason = "当前仓位已达或超过目标仓位"
+            hard_block_reason = "全资产仓位已达或超过第一年配置目标"
         elif "数据不足" in quality_status:
             hard_block_kind = "quality_missing"
             hard_block_reason = "缺少完整质量评分或证据，禁止新增"
@@ -3090,8 +4729,12 @@ def build_buy_filter(
         low = quote["Low"] if quote is not None else None
         prev_close = quote["PrevClose"] if quote is not None else None
         prev_day_low = quote["PrevDayLow"] if quote is not None else None
+        prev_day_low_source = quote["PrevDayLowSource"] if quote is not None and "PrevDayLowSource" in quote.index else ""
         quote_time = quote["QuoteTime"] if quote is not None else None
         data_source = quote["DataSource"] if quote is not None else ""
+        interface_status = quote["接口状态"] if quote is not None and "接口状态" in quote.index else "行情未刷新"
+        failure_reason = quote["失败原因"] if quote is not None and "失败原因" in quote.index else "未生成接口诊断"
+        retry_result = quote["重试结果"] if quote is not None and "重试结果" in quote.index else "未生成重试诊断"
         amount = quote["Amount"] if quote is not None else None
         avg20_amount = quote["Avg20Amount"] if quote is not None else None
         avg20_source = quote["Avg20AmountSource"] if quote is not None and "Avg20AmountSource" in quote.index else ""
@@ -3203,6 +4846,16 @@ def build_buy_filter(
         if avg20_is_proxy and technical_signal == "绿":
             technical_signal = "黄"
 
+        quant_validation = quant_validation_result(
+            pass_items=pass_items,
+            fail_items=fail_items,
+            pending_items=pending_items,
+            quality_value=quality_value,
+            emotion_temperature=emotion_temperature,
+            veto=veto,
+            hard_block_kind=hard_block_kind,
+        )
+
         range_block_kind = hard_block_kind
         range_block_reason = hard_block_reason
         if hard_block_kind == "position_full":
@@ -3229,6 +4882,7 @@ def build_buy_filter(
             hard_block_kind=range_block_kind,
             hard_block_reason=range_block_reason,
             veto_reason=veto_reason,
+            prev_day_low_source=prev_day_low_source,
         )
         if hard_block_kind:
             veto = "是"
@@ -3242,6 +4896,8 @@ def build_buy_filter(
                 suggestion = f"持有不加，禁止新增；{position_status}"
             elif hard_block_kind == "missing_weight":
                 suggestion = "仓位数据缺失，先核对持仓，禁止买入"
+            elif hard_block_kind == "missing_annual_target":
+                suggestion = "缺少第一年全资产配置目标，先补映射，禁止新增"
             elif hard_block_kind == "quality":
                 suggestion = "质量评分低于6分，禁止新增"
             elif hard_block_kind == "quality_missing":
@@ -3272,53 +4928,95 @@ def build_buy_filter(
             suggestion = "可观察（量能基准为替代，需复核）"
             decision_level = "黄"
 
-        rows.append(
-            {
-                "买点灯号": decision_level,
-                "Code": code,
-                "Name": name,
-                "建议买入区间": buy_range_recommendation,
-                "Role": role,
-                "质量评分": quality_value,
-                "质量状态": quality_status,
-                "情绪温度": emotion_temperature,
-                "反馈状态": feedback,
-                "当前仓位": current_weight,
-                "目标仓位": target_weight,
-                "剩余额度": remaining_weight,
-                "仓位状态": position_status,
-                "Latest": latest,
-                "PctChg": pct_chg,
-                "日内位置": intraday_pos,
-                "量能倍数": vr,
-                "分时结构": describe_intraday_position(intraday_pos),
-                "量价关系": describe_price_volume(pct_chg, amount, avg20_amount),
-                "份额变动": first_valid_text(quote["ETFShareChg"] if quote is not None else None, fallback=share_proxy),
-                "折溢价": first_valid_text(quote["Premium"] if quote is not None else None, fallback=premium_proxy),
-                "龙头同步": first_valid_text(item.get("Leader Signal"), fallback="待人工确认"),
-                "次日验证": first_valid_text(item.get("Next-Day Signal"), fallback="待次日确认"),
-                "通过项": pass_count,
-                "通过明细": "；".join(pass_items) if pass_items else "无",
-                "未通过项": "；".join(fail_items) if fail_items else "无",
-                "待确认项": "；".join(pending_items) if pending_items else "无",
-                "一票否决": veto,
-                "否决原因": veto_reason,
-                "建议": suggestion,
-            }
-        )
+        row = {
+            "买点灯号": decision_level,
+            "Code": code,
+            "Name": name,
+            "建议买入区间": buy_range_recommendation,
+            "Role": role,
+            "质量评分": quality_value,
+            "质量状态": quality_status,
+            "情绪温度": emotion_temperature,
+            "反馈状态": feedback,
+            "趋势结构": volume_profile["趋势结构"],
+            "关键支撑纪律": volume_profile["关键支撑纪律"],
+            "单次仓位上限": volume_profile["单次仓位上限"],
+            "爆量/量质吸纪律": volume_profile["爆量/量质吸纪律"],
+            "机会成本检查": cognitive_profile["机会成本检查"],
+            "认知防错": cognitive_profile["认知防错"],
+            "决策树情景": cognitive_profile["决策树情景"],
+            "赔率/最大损失": cognitive_profile["赔率/最大损失"],
+            "反向失败路径": cognitive_profile["反向失败路径"],
+            "能力圈边界": cognitive_profile["能力圈边界"],
+            "资产角色": quant_role["资产角色"],
+            "量化验证分": quant_validation["量化验证分"],
+            "量化验证状态": quant_validation["量化验证状态"],
+            "量化买点规则": quant_role["量化买点规则"],
+            "正期望检查": quant_validation["正期望检查"],
+            "量化风控规则": quant_role["量化风控规则"],
+            "红利配置角色": dividend_profile["红利配置角色"],
+            "分红质量检查": dividend_profile["分红质量检查"],
+            "红利买点规则": dividend_profile["红利买点规则"],
+            "高息陷阱否决": dividend_profile["高息陷阱否决"],
+            "当前仓位": current_weight,
+            "目标仓位": target_weight,
+            "剩余额度": remaining_weight,
+            "仓位状态": position_status,
+            "仓位决策口径": decision_basis,
+            "全资产当前仓位": current_weight,
+            "全资产目标仓位": target_weight,
+            "全资产剩余额度": remaining_weight,
+            "全资产仓位状态": position_status,
+            "证券账户仓位": to_float(broker_current_weight),
+            "证券账户目标仓位": to_float(broker_target_weight),
+            "证券账户仓位状态": broker_position_status,
+            "Latest": latest,
+            "PctChg": pct_chg,
+            "Open": open_price,
+            "High": high,
+            "Low": low,
+            "PrevClose": prev_close,
+            "PrevDayLow": prev_day_low,
+            "PrevDayLowSource": prev_day_low_source,
+            "QuoteTime": quote_time,
+            "DataSource": data_source,
+            "接口状态": interface_status,
+            "失败原因": failure_reason,
+            "重试结果": retry_result,
+            "评分输入状态": quality_input_status,
+            "评分缺失项": quality_missing_items,
+            "日内位置": intraday_pos,
+            "量能倍数": vr,
+            "分时结构": describe_intraday_position(intraday_pos),
+            "量价关系": describe_price_volume(pct_chg, amount, avg20_amount),
+            "份额变动": first_valid_text(quote["ETFShareChg"] if quote is not None else None, fallback=share_proxy),
+            "折溢价": first_valid_text(quote["Premium"] if quote is not None else None, fallback=premium_proxy),
+            "龙头同步": first_valid_text(item.get("Leader Signal"), fallback="待人工确认"),
+            "次日验证": first_valid_text(item.get("Next-Day Signal"), fallback="待次日确认"),
+            "通过项": pass_count,
+            "通过明细": "；".join(pass_items) if pass_items else "无",
+            "未通过项": "；".join(fail_items) if fail_items else "无",
+            "待确认项": "；".join(pending_items) if pending_items else "无",
+            "一票否决": veto,
+            "否决原因": veto_reason,
+            "建议": suggestion,
+        }
+        row.update(evaluate_stage_progression(pd.Series(row)))
+        rows.append(row)
 
     return pd.DataFrame(rows, columns=BUY_FILTER_COLUMNS)
 
 
 def main() -> int:
     print("=" * 60)
-    print(f"{FRAMEWORK_VERSION} {PRODUCT_NAME}")
+    print(f"{FRAMEWORK_DISPLAY_VERSION} {PRODUCT_NAME}")
     print("=" * 60)
     print("提示：本程序只生成 Excel 纪律提醒，不会下单。")
     print()
 
     watchlist = load_watchlist()
     decision_inputs = load_decision_inputs()
+    buy_point_plan_source = load_buy_point_plan()
     first_year_source = load_first_year_allocation()
     account_meta, positions = load_positions()
     print(f"已读取观察池 {len(watchlist)} 条，持仓 {len(positions)} 条，第一年配置 {len(first_year_source)} 项。")
@@ -3333,7 +5031,7 @@ def main() -> int:
     double_anchor = build_double_anchor(market_data)
     quality_score = build_quality_score(watchlist, market_data)
     emotion = build_emotion_thermometer(market_data, decision_inputs)
-    buy_filter = build_buy_filter(watchlist, market_data, positions, quality_score, emotion)
+    buy_filter = build_buy_filter(watchlist, market_data, positions, quality_score, emotion, first_year)
     positions_action = build_positions_action(positions, market_data)
     broker_snapshot = build_broker_snapshot(positions)
     exposure = build_exposure_summary(positions_sheet, account_meta)
@@ -3350,12 +5048,14 @@ def main() -> int:
     data_sources = build_data_sources()
     checks = build_checks(watchlist, positions, positions_sheet, account_meta, market_data, quality_score, first_year)
     execution_plan = build_execution_plan(buy_filter, positions_action, positions_sheet, first_year)
-    decision_center = build_decision_center(double_anchor, emotion, quality_score, buy_filter, positions_action, first_year_summary)
+    decision_center = build_decision_center(double_anchor, emotion, quality_score, buy_filter, positions_action, first_year_summary, decision_inputs)
     dashboard = build_dashboard(account_meta, alerts, market_data, double_anchor, emotion, buy_filter, quality_score, positions_sheet, decision_inputs, first_year_summary)
     portfolio_overview = build_portfolio_overview(dashboard)
     permission_row = decision_center[decision_center["层级"] == "市场权限"]
     market_permission = str(permission_row.iloc[0]["状态"]) if not permission_row.empty else "待确认"
+    stage_progression = build_stage_progression_view(buy_filter, market_permission)
     buy_candidates = build_buy_candidates_view(buy_filter, market_permission)
+    buy_point_plan = build_buy_point_plan_view(buy_point_plan_source, positions_sheet, buy_filter)
     position_risk = build_position_risk_view(positions_action, positions_sheet)
     action_plan = build_action_plan_view(execution_plan, buy_filter, positions_sheet)
     action_dashboard = build_action_dashboard_view(
@@ -3365,6 +5065,13 @@ def main() -> int:
         position_risk,
         dashboard,
     )
+    long_term_tracking = build_long_term_tracking_view(
+        watchlist_output,
+        market_data,
+        quality_score,
+        buy_filter,
+        first_year,
+    )
 
     # 把原始 watchlist 也写进去，方便对照
     output_xlsx = make_output_xlsx_path()
@@ -3372,34 +5079,41 @@ def main() -> int:
         "01_今日决策": action_dashboard,
         "02_今日动作": action_plan,
         "03_买入候选": buy_candidates,
-        "04_持仓风险": position_risk,
-        "05_年度配置": first_year,
-        "06_组合总览": portfolio_overview,
+        "04_阶段推进": stage_progression,
+        "买点计划": buy_point_plan,
+        "05_持仓风险": position_risk,
+        "06_年度配置": first_year,
+        "07_组合总览": portfolio_overview,
         "Double_Anchor": double_anchor,
         "Emotion": emotion,
         "Quality_Score": quality_score,
         "Exposure": exposure,
         "Market_Data": market_data,
+        "Buy_Filter": buy_filter,
         "Positions": positions_sheet,
         "Broker_Snapshot": broker_snapshot,
         "Watchlist": watchlist_output,
+        "长期跟踪个股": long_term_tracking,
         "Investment_Profile": investment_profile,
         "Data_Sources": data_sources,
+        "Buy_Point_Plan_Source": buy_point_plan_source,
         "Framework_Rules": rules,
         "Checks": checks,
         "使用说明": pd.DataFrame(
             [
                 {"步骤": "1", "操作": "编辑 watchlist.csv", "说明": "维护观察池代码、角色、目标权重"},
                 {"步骤": "2", "操作": "补充质量与六项信号", "说明": "在watchlist.csv填写完整质量分、评分证据、份额/筹码、折溢价/估值、龙头同步和次日验证"},
-                {"步骤": "3", "操作": "编辑 decision_inputs.csv", "说明": "可选：填写1-5级人工情绪温度；空白时只显示低可靠性代理"},
-                {"步骤": "4", "操作": "编辑 first_year_allocation.csv", "说明": "维护第一年全资产目标、代码映射、收益观察区间与执行约束；年度缺口不是买入信号"},
-                {"步骤": "5", "操作": "编辑 investment_profile.csv", "说明": "维护投资偏好、纪律开关、建议刷新时间和展示偏好"},
-                {"步骤": "6", "操作": "查看 Data_Sources", "说明": "确认行情、持仓、年度配置和盘前情报的数据来源与失败处理"},
-                {"步骤": "7", "操作": "编辑 positions.csv", "说明": "维护持仓数量、成本、账户总资产和券商截图持仓快照"},
-                {"步骤": "8", "操作": "运行 python main.py", "说明": "抓取行情并生成 Excel"},
-                {"步骤": "9", "操作": f"打开 output 文件夹里最新的 {FRAMEWORK_VERSION}_每日行情输出_日期时间.xlsx", "说明": "按顺序查看 01_今日决策、02_今日动作、03_买入候选、04_持仓风险、05_年度配置和06_组合总览"},
-                {"步骤": "10", "操作": "理解双口径", "说明": "第一年目标使用全资产口径；证券账户目标继续作为集中度硬约束"},
-                {"步骤": "11", "操作": "理解数据边界", "说明": "缺失项不得自动判绿；代理分不折算为完整评分"},
+                {"步骤": "3", "操作": "补充量化验证口径", "说明": "按资产角色确认指数环境、ETF买点、情绪温度、正期望和风险监控；资金流入不能单独触发买入"},
+                {"步骤": "4", "操作": "编辑 decision_inputs.csv", "说明": "可选：填写1-5级人工情绪温度、主线周期、趋势买点类型、量化模块状态和退潮三因子状态；空白时只显示框架默认或低可靠性代理"},
+                {"步骤": "5", "操作": "编辑 first_year_allocation.csv", "说明": "维护第一年全资产目标、代码映射、收益观察区间与执行约束；CASH代表证券账户可用现金，年度缺口不是买入信号"},
+                {"步骤": "6", "操作": "编辑 investment_profile.csv", "说明": "维护投资偏好、纪律开关、建议刷新时间和展示偏好"},
+                {"步骤": "7", "操作": "查看 Data_Sources", "说明": "确认行情、持仓、年度配置、量化验证和盘前情报的数据来源与失败处理"},
+                {"步骤": "8", "操作": "查看 长期跟踪个股", "说明": "长期跟踪股票进入每日行情监控；未补完整评分前只观察不自动买入"},
+                {"步骤": "9", "操作": "编辑 positions.csv", "说明": "维护持仓数量、成本、账户总资产和券商截图持仓快照"},
+                {"步骤": "10", "操作": "运行 python main.py", "说明": "抓取行情并生成 Excel"},
+                {"步骤": "11", "操作": f"打开 output 文件夹里最新的 {FRAMEWORK_VERSION}_每日行情输出_日期时间.xlsx", "说明": "按顺序查看 01_今日决策、02_今日动作、03_买入候选、04_阶段推进、买点计划、05_持仓风险、06_年度配置和07_组合总览"},
+                {"步骤": "12", "操作": "理解双口径", "说明": "买入和减仓建议使用全资产/第一年配置口径；证券账户口径只作交易集中度参考"},
+                {"步骤": "13", "操作": "理解数据边界", "说明": "缺失项不得自动判绿；代理分不折算为完整评分"},
             ]
         ),
     }
@@ -3408,8 +5122,8 @@ def main() -> int:
 
     print()
     print(f"已生成 Excel：{output_xlsx}")
-    print("请先查看 01_今日决策、02_今日动作、03_买入候选和04_持仓风险，再查看年度配置与组合总览。")
-    if market_data["Latest"].isna().any():
+    print("请先查看 01_今日决策、02_今日动作、03_买入候选、04_阶段推进、买点计划和05_持仓风险，再查看年度配置与组合总览。")
+    if missing_latest_mask(market_data["Latest"]).any():
         print("注意：部分代码未取到行情，可能是网络问题、代码错误或接口暂时不可用。")
     return 0
 

@@ -12,6 +12,24 @@ from docx import Document
 from docx.oxml.ns import qn
 
 
+class FakeResponse:
+    def __init__(self, text):
+        self.text = text
+
+    def raise_for_status(self):
+        return None
+
+
+class FakeSession:
+    def __init__(self, text):
+        self.text = text
+        self.urls = []
+
+    def get(self, url, timeout):
+        self.urls.append((url, timeout))
+        return FakeResponse(self.text)
+
+
 class PremarketReportTests(unittest.TestCase):
     def test_parse_time_normalizes_utc_to_shanghai(self):
         self.assertEqual(
@@ -55,6 +73,41 @@ class PremarketReportTests(unittest.TestCase):
         self.assertIn("财联社", summary)
         self.assertIn("重试", summary)
         self.assertIn("备用源成功", summary)
+
+    def test_market_attempt_summary_is_bounded(self):
+        summary = main.format_market_attempt_summary(
+            [
+                ("Yahoo query1 ^GSPC", "失败 dns"),
+                ("Yahoo query2 ^GSPC", "失败 timeout"),
+                ("Stooq ^spx", "失败 empty"),
+                ("Stooq backup", "失败 empty"),
+                ("extra1", "失败"),
+                ("extra2", "失败"),
+            ],
+            max_attempts=3,
+        )
+        self.assertIn("Yahoo query1", summary)
+        self.assertIn("Stooq ^spx", summary)
+        self.assertIn("另3次尝试失败", summary)
+
+    def test_stooq_history_parser_uses_last_two_closes(self):
+        session = FakeSession(
+            "Date,Open,High,Low,Close,Volume\n"
+            "2026-06-22,5000,5050,4990,5000,100\n"
+            "2026-06-23,5100,5130,5070,5120,120\n"
+        )
+        quote = main.fetch_one_stooq_symbol(
+            session,
+            {"name": "标普500", "unit": "点", "kind": "index"},
+            "^spx",
+        )
+
+        self.assertIsNotNone(quote)
+        self.assertEqual(quote.latest, 5120.0)
+        self.assertEqual(quote.previous, 5000.0)
+        self.assertEqual(quote.pct_change, 2.4)
+        self.assertEqual(quote.symbol, "Stooq:^spx")
+        self.assertEqual(quote.data_time, "2026-06-23")
 
     def test_table_geometry_sets_explicit_dxa_indent(self):
         doc = Document()

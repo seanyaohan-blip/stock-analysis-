@@ -26,10 +26,18 @@ function parseAccountMeta(text) {
 }
 
 const allocationRows = parseSimpleCsv(await fs.readFile(path.join(root, "first_year_allocation.csv"), "utf8"));
+const allocationLastRow = allocationRows.length + 1;
+const allocationTargetWeight = allocationRows.reduce((total, row) => total + Number(row.TargetWeight || 0), 0);
 const positionsText = await fs.readFile(path.join(root, "positions.csv"), "utf8");
 const accountMeta = parseAccountMeta(positionsText);
 const positions = parseSimpleCsv(positionsText.split(/\r?\n/).filter((line) => !line.startsWith("#")).join("\n"));
-const positionByCode = new Map(positions.map((row) => [String(row.Code).padStart(6, "0"), row]));
+
+function normalizeCode(code) {
+  const text = String(code || "").trim();
+  return /^\d+$/.test(text) ? text.padStart(6, "0") : text;
+}
+
+const positionByCode = new Map(positions.map((row) => [normalizeCode(row.Code), row]));
 
 const workbook = Workbook.create();
 const summary = workbook.worksheets.add("Summary");
@@ -76,9 +84,9 @@ summary.getRange("A3:B10").values = [
 styleHeader(summary.getRange("A3:B3"));
 summary.getRange("B4").format.font = { color: "#0000FF" };
 summary.getRange("B5:B10").formulas = [
-  ["=SUM(Allocation!D2:D12)"],
-  ["=SUM(Allocation!G2:G12)"],
-  ["=SUM(Allocation!H2:H12)"],
+  [`=SUM(Allocation!D2:D${allocationLastRow})`],
+  [`=SUM(Allocation!G2:G${allocationLastRow})`],
+  [`=SUM(Allocation!H2:H${allocationLastRow})`],
   ["=B6-B7"],
   ["=IF(B6=0,0,B7/B6)"],
   ["=MAX(1-B5,0)"],
@@ -90,7 +98,7 @@ summary.getRange("B5:B5").format.numberFormat = "0.0%";
 summary.getRange("B6:B8").format.numberFormat = "#,##0;[Red](#,##0);-";
 summary.getRange("B9:B10").format.numberFormat = "0.0%";
 summary.getRange("A12:H15").merge();
-summary.getRange("A12").values = [["口径说明：第一年配置使用全资产口径；证券账户目标继续作为集中度硬约束。年度资金缺口只代表长期规划空间，不构成当日买入信号。目标收益为观察区间，不是承诺收益。"]];
+summary.getRange("A12").values = [["口径说明：第一年配置使用全资产口径；证券账户目标只作为集中度参考。年度资金缺口只代表长期规划空间，不构成当日买入信号。爆量本身不是买点，新增资金仍需等待缩量回踩不破、龙头同步、次日转强。V2.8.5-QM还要求买入前完成量化验证、正期望、机会成本、反证、最大损失和能力圈检查。红利个股属于低波现金流层，必须排除高息陷阱后慢建。目标收益为观察区间，不是承诺收益。"]];
 summary.getRange("A12:H15").format.fill = paleYellow;
 summary.getRange("A12:H15").format.wrapText = true;
 summary.getRange("A12:H15").format.verticalAlignment = "center";
@@ -132,8 +140,16 @@ const mappingRows = [];
 for (const row of allocationRows) {
   const codes = (row.Codes || "").split("|").filter(Boolean);
   for (const code of codes) {
-    const position = positionByCode.get(code) || {};
-    mappingRows.push([row.AllocationKey, code, position.Name || "未持有", Number(position["Market Value"] || 0), row.Label]);
+    const normalizedCode = normalizeCode(code);
+    const position = positionByCode.get(normalizedCode) || {};
+    const isCash = normalizedCode === "CASH";
+    mappingRows.push([
+      row.AllocationKey,
+      normalizedCode,
+      isCash ? "证券可用现金" : position.Name || "未持有",
+      isCash ? Number(accountMeta.available_cash || 0) : Number(position["Market Value"] || 0),
+      row.Label,
+    ]);
   }
 }
 mapping.getRange("A1:E1").values = [["配置键", "代码", "名称", "当前市值", "配置项"]];
@@ -154,6 +170,20 @@ const ruleRows = [
   ["年度配置", "资金缺口", "动态目标金额减当前映射金额", "不是买入信号"],
   ["质量准入", "完整评分", "ETF/个股需完整10分评分与证据", "缺失时禁止新增"],
   ["买点过滤", "标准首批", "六项通过至少5项且无否决", "仅进入复核"],
+  ["量化验证", "正期望", "胜率×平均盈利-失败率×平均亏损需为正", "资金流入不能单独触发买入"],
+  ["量化验证", "资产角色", "核心成长/低波权益/弹性低波/纯防御/遗留仓/卫星个股", "不同资产不能套用同一买点规则"],
+  ["红利现金流", "配置定位", "红利个股是低波现金流层，不是核心成长收益发动机", "负责波动缓冲、现金流和风格平衡"],
+  ["红利现金流", "买入绿灯", "分红连续性、现金流覆盖、分红率健康、股息率安全垫、估值中低位、缩量回踩", "满足后小仓慢建，不追高"],
+  ["红利现金流", "高息陷阱否决", "分红率>100%、高息来自股价暴跌、盈利/现金流恶化、举债分红、资本开支压力", "任一触发均不得新增"],
+  ["红利现金流", "仓位节奏", "红利个股+红利低波初始3%–5%，第一阶段6%–8%，稳定后10%–15%", "单只A档0.5%–1%，B档0.3%–0.8%"],
+  ["爆量/量质吸", "核心路径", "爆量突破→缩量回踩→不破关键支撑→再次放量转强", "爆量只看方向，回踩确认才是核心买点"],
+  ["爆量突破", "小仓试探", "ETF单次全资产0.5%–1%；个股0.3%–0.5%", "不允许一次性补满目标仓位"],
+  ["回踩确认", "最佳买点", "不破爆量K低点/5日/10日；龙头不破；份额未连续赎回；次日转强", "核心ETF≤1%；强确认1%–2%；个股≤0.5%"],
+  ["爆量失败", "暂停/复审", "低开低走、跌破爆量K低点、放量滞涨/下跌、龙头分化、ETF连续赎回", "1项暂停新增，2项战术仓复审，3项以上核心仓降温"],
+  ["认知防错", "八问", "机会成本/确认偏误/易得性偏差/沉没成本/最大亏损/全资产更优选择/能力圈/10个月后认可度", "两项以上回答不清则不买"],
+  ["机会成本", "新增资金优先级", "159516>159381>A500/可转债>机器人>云计算/非核心仓", "默认排序仍需结合买点、赔率和全资产口径"],
+  ["沉没成本", "亏损不构成买入理由", "中望/比亚迪/绿电/云计算等非核心或遗留仓禁止摊低补仓", "只有主线、质量、买点和赔率重新通过才可升级"],
+  ["反脆弱", "组合结构", "核心成长收益+低波权益稳定+可转债弹性缓冲+现金/国债回踩弹药", "不是满仓科技，而是在波动中保留买点弹药"],
   ["情绪纪律", "4级及以上", "火热/狂热", "暂停新增"],
   ["执行纪律", "单日上限", "一个买入方向+两个卖出/减仓方向", "系统性风险日只做风控"],
 ];
@@ -169,9 +199,9 @@ styleHeader(sources.getRange("A1:F1"));
 const sourceRows = [
   ["当前全资产总额", accountMeta.total_assets || 0, "元", "持仓截图日期", "positions.csv", "用于动态重算年度目标金额"],
   ["证券账户总市值", accountMeta.broker_market_value || 0, "元", "持仓截图日期", "positions.csv", "用于持仓勾稽"],
-  ["第一年配置比例", "58%", "%", "来源未标注", "1st年配置表.xlsx", "其余42%需保留为未配置/现金/防御空间"],
+  ["第一年配置比例", `${Math.round(allocationTargetWeight * 100)}%`, "%", "V2.8.5-QM红利现金流增强版", "first_year_allocation.csv", "显式包含纯防御层和红利现金流层；年度缺口不是买入信号"],
   ["目标收益区间", "5%-35%", "%", "来源未标注", "1st年配置表.xlsx", "观察区间，不是收益承诺"],
-  ["映射与约束", "11项配置", "项", "本次优化", "first_year_allocation.csv", "维护代码映射与执行约束"],
+  ["映射与约束", `${allocationRows.length}项配置`, "项", "本次优化", "first_year_allocation.csv", "维护代码映射与执行约束"],
 ];
 sources.getRange(`A2:F${sourceRows.length + 1}`).values = sourceRows;
 sources.getRange(`A2:F${sourceRows.length + 1}`).format.wrapText = true;
@@ -179,17 +209,15 @@ sources.showGridLines = false;
 sources.tables.add(`A1:F${sourceRows.length + 1}`, true, "AllocationSourcesTable");
 setWidths(sources, { A: 24, B: 18, C: 12, D: 16, E: 28, F: 48 });
 
-sources.getRange("H1:J12").values = [["配置项", "当前金额", "动态目标"], ...allocationRows.map((row) => [row.Label, null, null])];
-for (let row = 19; row <= 29; row += 1) {
-  const sourceRow = row - 17;
-  const auditRow = row - 18;
-  sources.getRange(`I${auditRow + 1}`).formulas = [[`=Allocation!H${sourceRow}`]];
-  sources.getRange(`J${auditRow + 1}`).formulas = [[`=Allocation!G${sourceRow}`]];
+sources.getRange(`H1:J${allocationLastRow}`).values = [["配置项", "当前金额", "动态目标"], ...allocationRows.map((row) => [row.Label, null, null])];
+for (let auditRow = 2; auditRow <= allocationLastRow; auditRow += 1) {
+  sources.getRange(`I${auditRow}`).formulas = [[`=Allocation!H${auditRow}`]];
+  sources.getRange(`J${auditRow}`).formulas = [[`=Allocation!G${auditRow}`]];
 }
 styleHeader(sources.getRange("H1:J1"));
-sources.getRange("I2:J12").format.numberFormat = "#,##0";
+sources.getRange(`I2:J${allocationLastRow}`).format.numberFormat = "#,##0";
 setWidths(sources, { H: 30, I: 16, J: 16 });
-const chart = summary.charts.add("ColumnClustered", sources.getRange("H1:J12"), "Auto");
+const chart = summary.charts.add("ColumnClustered", sources.getRange(`H1:J${allocationLastRow}`), "Auto");
 chart.title.text = "第一年配置：当前金额与动态目标";
 chart.setPosition(summary.getRange("D2:H16"));
 chart.width = 760;

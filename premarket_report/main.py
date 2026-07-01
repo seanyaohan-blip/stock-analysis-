@@ -70,16 +70,18 @@ SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
 
 
 # ==================== 隔夜行情配置 ====================
-# 使用 Yahoo Finance 免费行情接口。若某个 symbol 失效，程序会自动尝试同一行的后备 symbol。
+# 使用 Yahoo Finance 免费行情接口，失败时切换 Yahoo 备用 host，再切到 Stooq 历史 CSV。
+# 任何入口失败都会写入审计；不会用旧数据或空数据补成“最新”。
+YAHOO_CHART_HOSTS = ("query1.finance.yahoo.com", "query2.finance.yahoo.com")
 MARKET_ITEMS = [
-    {"name": "纳指", "symbols": ["^IXIC"], "unit": "点", "kind": "index"},
-    {"name": "标普500", "symbols": ["^GSPC"], "unit": "点", "kind": "index"},
-    {"name": "道指", "symbols": ["^DJI"], "unit": "点", "kind": "index"},
-    {"name": "A50", "symbols": ["CN=F", "XIN9.FGI", "2823.HK"], "unit": "点", "kind": "index"},
-    {"name": "美债10Y", "symbols": ["^TNX"], "unit": "%", "kind": "yield"},
-    {"name": "美元", "symbols": ["DX-Y.NYB", "DX=F"], "unit": "点", "kind": "index"},
-    {"name": "黄金", "symbols": ["GC=F", "XAUUSD=X"], "unit": "美元/盎司", "kind": "commodity"},
-    {"name": "原油", "symbols": ["CL=F", "BZ=F"], "unit": "美元/桶", "kind": "commodity"},
+    {"name": "纳指", "symbols": ["^IXIC"], "stooq_symbols": ["^comp", "^ndq"], "unit": "点", "kind": "index"},
+    {"name": "标普500", "symbols": ["^GSPC"], "stooq_symbols": ["^spx"], "unit": "点", "kind": "index"},
+    {"name": "道指", "symbols": ["^DJI"], "stooq_symbols": ["^dji"], "unit": "点", "kind": "index"},
+    {"name": "A50", "symbols": ["CN=F", "XIN9.FGI", "2823.HK"], "stooq_symbols": ["cn.f"], "unit": "点", "kind": "index"},
+    {"name": "美债10Y", "symbols": ["^TNX"], "stooq_symbols": ["10usy.b"], "unit": "%", "kind": "yield"},
+    {"name": "美元", "symbols": ["DX-Y.NYB", "DX=F"], "stooq_symbols": ["dx.f"], "unit": "点", "kind": "index"},
+    {"name": "黄金", "symbols": ["GC=F", "XAUUSD=X"], "stooq_symbols": ["gc.f", "xauusd"], "unit": "美元/盎司", "kind": "commodity"},
+    {"name": "原油", "symbols": ["CL=F", "BZ=F"], "stooq_symbols": ["cl.f", "brn.f"], "unit": "美元/桶", "kind": "commodity"},
 ]
 
 
@@ -93,11 +95,30 @@ NEWS_SOURCE_FALLBACKS = {
             "Label": "Google News site:marketwatch.com",
         }
     ],
+    "CNBC": [
+        {
+            "Type": "rss",
+            "URL": "https://news.google.com/rss/search?q=site%3Acnbc.com%20%28markets%20OR%20stocks%20OR%20China%20OR%20Federal%20Reserve%29&hl=en-US&gl=US&ceid=US:en",
+            "Label": "Google News site:cnbc.com",
+        }
+    ],
     "财联社": [
+        {
+            "Type": "cls_api",
+            "URL": "https://www.cls.cn/nodeapi/telegraphList?app=CailianpressWeb&category=&lastTime=&last_time=&os=web&refresh_type=1&rn=20&sv=7.7.5",
+            "Label": "财联社电报API",
+        },
         {
             "Type": "rss",
             "URL": "https://news.google.com/rss/search?q=site%3Acls.cn%20%28A%E8%82%A1%20OR%20%E7%BB%8F%E6%B5%8E%20OR%20%E6%94%BF%E7%AD%96%20OR%20%E5%B8%82%E5%9C%BA%29&hl=zh-CN&gl=CN&ceid=CN:zh-Hans",
             "Label": "Google News site:cls.cn",
+        }
+    ],
+    "证券时报": [
+        {
+            "Type": "html",
+            "URL": "https://www.stcn.com/kuaixun/",
+            "Label": "证券时报快讯页",
         }
     ],
     "中国政府网": [
@@ -105,6 +126,27 @@ NEWS_SOURCE_FALLBACKS = {
             "Type": "html",
             "URL": "https://www.gov.cn/",
             "Label": "中国政府网首页要闻",
+        }
+    ],
+    "央行": [
+        {
+            "Type": "html",
+            "URL": "https://www.pbc.gov.cn/goutongjiaoliu/113456/113469/index.html",
+            "Label": "央行 HTTPS 新闻页",
+        }
+    ],
+    "证监会": [
+        {
+            "Type": "html",
+            "URL": "https://www.csrc.gov.cn/csrc/index.shtml",
+            "Label": "证监会 HTTPS 首页",
+        }
+    ],
+    "发改委": [
+        {
+            "Type": "html",
+            "URL": "https://www.ndrc.gov.cn/xwdt/",
+            "Label": "发改委新闻动态首页",
         }
     ],
     "工信部": [
@@ -259,6 +301,7 @@ def read_dashboard_workbook() -> dict[str, pd.DataFrame]:
         "Decision_Center", "Dashboard", "Market_Data", "Double_Anchor", "Emotion",
         "Quality_Score", "Exposure", "Buy_Filter", "Positions", "Positions_Action",
         "FirstYear_Allocation", "Execution_Plan", "Checks", "Framework_Rules",
+        "长期跟踪个股", "Investment_Profile", "Data_Sources",
     ]
     sheets: dict[str, pd.DataFrame] = {}
     excel_file = pd.ExcelFile(dashboard_xlsx)
@@ -271,9 +314,16 @@ def read_dashboard_workbook() -> dict[str, pd.DataFrame]:
 
 
 # ==================== 抓取隔夜行情 ====================
-def yahoo_chart_url(symbol: str) -> str:
+def yahoo_chart_url(symbol: str, host: str = YAHOO_CHART_HOSTS[0]) -> str:
     encoded = quote(symbol, safe="")
-    return f"https://query1.finance.yahoo.com/v8/finance/chart/{encoded}?range=7d&interval=1d"
+    return f"https://{host}/v8/finance/chart/{encoded}?range=7d&interval=1d"
+
+
+def stooq_history_url(symbol: str) -> str:
+    encoded = quote(symbol, safe=".^")
+    end = datetime.now(SHANGHAI_TZ).strftime("%Y%m%d")
+    start = (datetime.now(SHANGHAI_TZ) - timedelta(days=21)).strftime("%Y%m%d")
+    return f"https://stooq.com/q/d/l/?s={encoded}&d1={start}&d2={end}&i=d"
 
 
 def timestamp_to_shanghai(value: Any) -> str:
@@ -284,9 +334,14 @@ def timestamp_to_shanghai(value: Any) -> str:
         return ""
 
 
-def fetch_one_yahoo_symbol(session: requests.Session, item: dict[str, Any], symbol: str) -> MarketQuote | None:
+def fetch_one_yahoo_symbol(
+    session: requests.Session,
+    item: dict[str, Any],
+    symbol: str,
+    host: str = YAHOO_CHART_HOSTS[0],
+) -> MarketQuote | None:
     """抓取一个 Yahoo symbol 的最近两个交易日收盘数据。"""
-    response = session.get(yahoo_chart_url(symbol), timeout=12)
+    response = session.get(yahoo_chart_url(symbol, host), timeout=12)
     response.raise_for_status()
     data = response.json()
     result = data.get("chart", {}).get("result", [])
@@ -329,9 +384,76 @@ def fetch_one_yahoo_symbol(session: requests.Session, item: dict[str, Any], symb
         pct_change=round(pct_change, 4) if pct_change is not None else None,
         change=round(change, 4) if change is not None else None,
         unit=item["unit"],
-        symbol=symbol,
+        symbol=f"Yahoo:{symbol}",
         data_time=timestamp_to_shanghai(meta.get("regularMarketTime") or (timestamps[-1] if timestamps else None)),
     )
+
+
+def fetch_one_stooq_symbol(session: requests.Session, item: dict[str, Any], symbol: str) -> MarketQuote | None:
+    """抓取 Stooq 日线 CSV；只用最近两个有效收盘价，不估算缺口。"""
+    response = session.get(stooq_history_url(symbol), timeout=12)
+    response.raise_for_status()
+    rows = list(csv.DictReader(response.text.splitlines()))
+    valid_rows = [
+        row for row in rows
+        if to_float(row.get("Close")) is not None and clean_text(row.get("Date"))
+    ]
+    if not valid_rows:
+        return None
+
+    latest_row = valid_rows[-1]
+    previous_row = valid_rows[-2] if len(valid_rows) >= 2 else None
+    latest_raw = to_float(latest_row.get("Close"))
+    previous_raw = to_float(previous_row.get("Close")) if previous_row else None
+    if latest_raw is None:
+        return None
+
+    divisor = float(item.get("divisor", 1.0))
+    if item.get("kind") == "yield":
+        raw_for_check = latest_raw if latest_raw is not None else previous_raw
+        if raw_for_check is not None and raw_for_check > 20:
+            divisor = 10.0
+    latest = latest_raw / divisor
+    previous = previous_raw / divisor if previous_raw is not None else None
+    change = latest - previous if previous is not None else None
+    pct_change = change / previous * 100 if previous not in (None, 0) else None
+
+    return MarketQuote(
+        name=item["name"],
+        latest=round(latest, 4),
+        previous=round(previous, 4) if previous is not None else None,
+        pct_change=round(pct_change, 4) if pct_change is not None else None,
+        change=round(change, 4) if change is not None else None,
+        unit=item["unit"],
+        symbol=f"Stooq:{symbol}",
+        data_time=clean_text(latest_row.get("Date")),
+    )
+
+
+def market_attempts_for_item(item: dict[str, Any]) -> list[dict[str, Any]]:
+    attempts: list[dict[str, Any]] = []
+    for symbol in item.get("symbols", []):
+        for host in YAHOO_CHART_HOSTS:
+            attempts.append({"provider": "yahoo", "host": host, "symbol": symbol, "label": f"Yahoo {host} {symbol}"})
+    for symbol in item.get("stooq_symbols", []):
+        attempts.append({"provider": "stooq", "symbol": symbol, "label": f"Stooq {symbol}"})
+    return attempts
+
+
+def fetch_market_attempt(session: requests.Session, item: dict[str, Any], attempt: dict[str, Any]) -> MarketQuote | None:
+    if attempt["provider"] == "yahoo":
+        return fetch_one_yahoo_symbol(session, item, attempt["symbol"], attempt["host"])
+    if attempt["provider"] == "stooq":
+        return fetch_one_stooq_symbol(session, item, attempt["symbol"])
+    raise ValueError(f"Unknown market provider: {attempt['provider']}")
+
+
+def format_market_attempt_summary(attempts: list[tuple[str, str]], max_attempts: int = 5) -> str:
+    visible = attempts[:max_attempts]
+    details = "；".join(f"{label}：{result}" for label, result in visible)
+    if len(attempts) > max_attempts:
+        details += f"；另{len(attempts) - max_attempts}次尝试失败"
+    return details
 
 
 def fetch_market_quotes() -> list[MarketQuote]:
@@ -347,14 +469,19 @@ def fetch_market_quotes() -> list[MarketQuote]:
     quotes: list[MarketQuote] = []
     for item in MARKET_ITEMS:
         quote_obj = None
-        error_note = ""
-        for symbol in item["symbols"]:
+        attempts: list[tuple[str, str]] = []
+        for attempt in market_attempts_for_item(item):
             try:
-                quote_obj = fetch_one_yahoo_symbol(session, item, symbol)
+                quote_obj = fetch_market_attempt(session, item, attempt)
                 if quote_obj:
+                    if attempts:
+                        attempts.append((attempt["label"], "备用源成功"))
+                        quote_obj.note = "行情源追踪：" + format_market_attempt_summary(attempts)
                     break
             except Exception as exc:
-                error_note = str(exc)
+                attempts.append((attempt["label"], f"失败 {clean_text(exc, 80)}"))
+                continue
+            attempts.append((attempt["label"], "无有效收盘数据"))
         if quote_obj is None:
             quote_obj = MarketQuote(
                 name=item["name"],
@@ -363,8 +490,8 @@ def fetch_market_quotes() -> list[MarketQuote]:
                 pct_change=None,
                 change=None,
                 unit=item["unit"],
-                symbol="/".join(item["symbols"]),
-                note=f"抓取失败：{clean_text(error_note, 80)}",
+                symbol="/".join(item.get("symbols", []) + item.get("stooq_symbols", [])),
+                note=f"抓取失败：{format_market_attempt_summary(attempts)}",
             )
         quotes.append(quote_obj)
     return quotes
@@ -1478,6 +1605,9 @@ def build_data_audit_lines(
         f"隔夜/全球行情：{len(available_quotes)}/{len(quotes)}项有值"
         f"{'；缺失 ' + '、'.join(missing_quotes) if missing_quotes else ''}；{quote_times or '无数据时间'}"
     )
+    for quote_obj in quotes:
+        if quote_obj.note:
+            lines.append(f"行情源追踪：{quote_obj.name}：{quote_obj.note}")
 
     group_counts: dict[str, int] = {}
     group_sources: dict[str, set[str]] = {}
@@ -1502,6 +1632,28 @@ def build_data_audit_lines(
         f"来源 {('、'.join(sorted(group_sources.get('官方源', set()))) or '无')}"
     )
 
+    long_watch = sheets.get("长期跟踪个股", pd.DataFrame())
+    if long_watch.empty:
+        lines.append("长期跟踪个股：未读取到数据，本节不得用于盘前判断")
+    else:
+        tracked_total = len(long_watch)
+        latest_available = int(long_watch["Latest"].notna().sum()) if "Latest" in long_watch.columns else 0
+        pct_available = int(long_watch["PctChg"].notna().sum()) if "PctChg" in long_watch.columns else 0
+        quote_time_available = int(long_watch["QuoteTime"].notna().sum()) if "QuoteTime" in long_watch.columns else 0
+        quality_available = int(long_watch["质量评分"].notna().sum()) if "质量评分" in long_watch.columns else 0
+        gate_available = int(long_watch["买点灯号"].notna().sum()) if "买点灯号" in long_watch.columns else 0
+        lines.append(
+            f"长期跟踪个股：{tracked_total}只；Latest {latest_available}/{tracked_total}；"
+            f"PctChg {pct_available}/{tracked_total}；QuoteTime {quote_time_available}/{tracked_total}；"
+            f"质量评分 {quality_available}/{tracked_total}；买点灯号 {gate_available}/{tracked_total}"
+        )
+
+    investment_profile = sheets.get("Investment_Profile", pd.DataFrame())
+    data_sources = sheets.get("Data_Sources", pd.DataFrame())
+    profile_rows = len(investment_profile) if not investment_profile.empty else 0
+    source_rows = len(data_sources) if not data_sources.empty else 0
+    lines.append(f"配置与来源：Investment_Profile {profile_rows}行；Data_Sources {source_rows}行")
+
     core_sheet_groups = [
         ("今日决策", ("01_今日决策", "Decision_Center")),
         ("组合总览", ("06_组合总览", "Dashboard")),
@@ -1517,6 +1669,9 @@ def build_data_audit_lines(
         ("今日动作", ("02_今日动作", "Execution_Plan")),
         ("校验", ("Checks",)),
         ("规则", ("Framework_Rules",)),
+        ("长期跟踪个股", ("长期跟踪个股",)),
+        ("投资画像", ("Investment_Profile",)),
+        ("数据来源", ("Data_Sources",)),
     ]
     empty_sheets = [label for label, names in core_sheet_groups if get_sheet_with_fallback(sheets, *names).empty]
     lines.append(
@@ -1570,7 +1725,7 @@ def write_report(
     shading = OxmlElement("w:shd")
     shading.set(qn("w:fill"), "FDECEC")
     boundary._p.get_or_add_pPr().append(shading)
-    boundary_run = boundary.add_run("纪律边界：市场权限 ≠ 买入信号；质量、情绪、买点、仓位任一未通过即不执行。本报告不连接券商、不自动交易。")
+    boundary_run = boundary.add_run("纪律边界：市场权限 ≠ 执行信号；质量、情绪、买点、仓位任一未通过即不执行。本报告不连接券商、不自动交易。")
     set_run_font(boundary_run, size=10, bold=True, color="9B1C1C")
 
     doc.add_heading("1. 决策摘要", level=1)
@@ -1583,7 +1738,7 @@ def write_report(
     )
     set_run_font(conclusion_run, size=11, bold=True, color="0B2545")
     add_framework_snapshot(doc, snapshot, anchor_action, risk_preference)
-    add_bullet(doc, "执行优先级：风控 > 清旧 > 补新 > 再平衡；单日最多一个买入方向和两个减仓方向。")
+    add_bullet(doc, "执行优先级：风控 > 清旧 > 补新 > 再平衡；单日最多一个可检查方向和两个复审方向。")
 
     doc.add_heading("2. 今日动作预算", level=1)
     add_execution_plan_table(doc, execution_plan)
