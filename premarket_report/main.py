@@ -67,6 +67,9 @@ FRAMEWORK_VERSION = "V2.8.5"
 NEWS_SOURCES_CSV = PROJECT_DIR / "news_sources.csv"
 OUTPUT_DIR = PROJECT_DIR / "output"
 SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
+POSITION_RISK_SHEET_NAMES = ("04_持仓风险", "05_持仓风险", "Positions_Action")
+FIRST_YEAR_SHEET_NAMES = ("05_年度配置", "06_年度配置", "FirstYear_Allocation")
+PORTFOLIO_SUMMARY_SHEET_NAMES = ("06_组合总览", "07_组合总览", "Dashboard")
 
 
 # ==================== 隔夜行情配置 ====================
@@ -297,7 +300,8 @@ def read_dashboard_workbook() -> dict[str, pd.DataFrame]:
 
     print(f"已读取每日行情文件：{dashboard_xlsx}")
     wanted_sheets = [
-        "01_今日决策", "02_今日动作", "03_买入候选", "04_持仓风险", "05_年度配置", "06_组合总览",
+        "01_今日决策", "02_今日动作", "03_买入候选",
+        "04_持仓风险", "05_持仓风险", "05_年度配置", "06_年度配置", "06_组合总览", "07_组合总览",
         "Decision_Center", "Dashboard", "Market_Data", "Double_Anchor", "Emotion",
         "Quality_Score", "Exposure", "Buy_Filter", "Positions", "Positions_Action",
         "FirstYear_Allocation", "Execution_Plan", "Checks", "Framework_Rules",
@@ -993,7 +997,7 @@ def build_position_impacts(
 ) -> list[dict[str, str]]:
     """生成持仓影响表。"""
     positions = sheets.get("Positions", pd.DataFrame())
-    actions = get_sheet_with_fallback(sheets, "04_持仓风险", "Positions_Action")
+    actions = get_sheet_with_fallback(sheets, *POSITION_RISK_SHEET_NAMES)
     if positions.empty:
         return []
 
@@ -1144,7 +1148,7 @@ def build_framework_snapshot(sheets: dict[str, pd.DataFrame]) -> dict[str, str]:
         snapshot["标准首批"] = str(int((buy_filter["买点灯号"] == "绿").sum()))
         snapshot["半额复核"] = str(int((buy_filter["买点灯号"] == "黄").sum()))
 
-    dashboard = get_sheet_with_fallback(sheets, "06_组合总览", "Dashboard")
+    dashboard = get_sheet_with_fallback(sheets, *PORTFOLIO_SUMMARY_SHEET_NAMES)
     if not dashboard.empty and {"项目", "内容"}.issubset(dashboard.columns):
         dashboard_map = dict(zip(dashboard["项目"].astype(str), dashboard["内容"]))
         value = to_float(dashboard_map.get("全资产权益穿透仓位"))
@@ -1581,7 +1585,7 @@ def build_data_audit_lines(
     """Build a factual completeness trail for every report data class."""
     lines: list[str] = []
     dashboard_path = find_latest_dashboard_xlsx()
-    dashboard = get_sheet_with_fallback(sheets, "06_组合总览", "Dashboard")
+    dashboard = get_sheet_with_fallback(sheets, *PORTFOLIO_SUMMARY_SHEET_NAMES)
     dashboard_map: dict[str, Any] = {}
     if not dashboard.empty and {"项目", "内容"}.issubset(dashboard.columns):
         dashboard_map = dict(zip(dashboard["项目"].astype(str), dashboard["内容"]))
@@ -1656,7 +1660,7 @@ def build_data_audit_lines(
 
     core_sheet_groups = [
         ("今日决策", ("01_今日决策", "Decision_Center")),
-        ("组合总览", ("06_组合总览", "Dashboard")),
+        ("组合总览", PORTFOLIO_SUMMARY_SHEET_NAMES),
         ("行情数据", ("Market_Data",)),
         ("双锚", ("Double_Anchor",)),
         ("情绪", ("Emotion",)),
@@ -1664,8 +1668,8 @@ def build_data_audit_lines(
         ("组合暴露", ("Exposure",)),
         ("买入候选", ("03_买入候选", "Buy_Filter")),
         ("持仓", ("Positions",)),
-        ("持仓风险", ("04_持仓风险", "Positions_Action")),
-        ("年度配置", ("05_年度配置", "FirstYear_Allocation")),
+        ("持仓风险", POSITION_RISK_SHEET_NAMES),
+        ("年度配置", FIRST_YEAR_SHEET_NAMES),
         ("今日动作", ("02_今日动作", "Execution_Plan")),
         ("校验", ("Checks",)),
         ("规则", ("Framework_Rules",)),
@@ -1827,7 +1831,7 @@ def main() -> int:
     snapshot = build_framework_snapshot(sheets)
     execution_plan = get_sheet_with_fallback(sheets, "02_今日动作", "Execution_Plan")
     checks = sheets.get("Checks", pd.DataFrame())
-    first_year = get_sheet_with_fallback(sheets, "05_年度配置", "FirstYear_Allocation")
+    first_year = get_sheet_with_fallback(sheets, *FIRST_YEAR_SHEET_NAMES)
     data_audit_lines = build_data_audit_lines(sheets, quotes, news, news_warnings)
 
     output_path = write_report(

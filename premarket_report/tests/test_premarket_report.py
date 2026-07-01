@@ -135,6 +135,15 @@ class PremarketReportTests(unittest.TestCase):
 
         self.assertEqual(result.iloc[0]["项目"], "旧首页")
 
+    def test_shifted_position_risk_sheet_name_is_supported(self):
+        shifted = pd.DataFrame([{"Code": "510210", "动作建议": "提示卖出20000份"}])
+        legacy = pd.DataFrame([{"Code": "legacy", "动作建议": "旧版"}])
+        sheets = {"05_持仓风险": shifted, "Positions_Action": legacy}
+
+        result = main.get_sheet_with_fallback(sheets, *main.POSITION_RISK_SHEET_NAMES)
+
+        self.assertEqual(result.iloc[0]["Code"], "510210")
+
 
 if __name__ == "__main__":
     unittest.main()
